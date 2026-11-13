@@ -100,6 +100,7 @@
 
 **Features**
 
+-   Add support for reading OGG/Opus audio files, enabled when the system Opus library is available
 -   Improve audio device and stream rerouting management (#3490, #3523)
 -   Add `sf::PlaybackDevice::getDeviceSampleRate` (#3525)
 -   [Linux] Update miniaudio to version 0.11.24 (#3640, #3641)

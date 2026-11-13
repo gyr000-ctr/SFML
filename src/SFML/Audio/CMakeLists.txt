@@ -48,6 +48,8 @@ set(CODECS_SRC
     ${SRCROOT}/SoundFileReaderMp3.cpp
     ${SRCROOT}/SoundFileReaderOgg.hpp
     ${SRCROOT}/SoundFileReaderOgg.cpp
+    ${SRCROOT}/SoundFileReaderOpus.hpp
+    ${SRCROOT}/SoundFileReaderOpus.cpp
     ${SRCROOT}/SoundFileReaderWav.hpp
     ${SRCROOT}/SoundFileReaderWav.cpp
     ${INCROOT}/SoundFileWriter.hpp
@@ -188,6 +190,19 @@ endif()
 
 find_package(Threads REQUIRED)
 
+# Ogg Opus decoding is optional and relies on the system Opus library.
+# When it is not available, SFML is still built and Opus files are rejected at runtime.
+sfml_set_option(SFML_AUDIO_ENABLE_OPUS ON BOOL "ON to enable Ogg Opus decoding when the Opus library is available, OFF to always build without Opus support")
+if(SFML_AUDIO_ENABLE_OPUS)
+    find_package(Opus QUIET)
+endif()
+if(SFML_AUDIO_ENABLE_OPUS AND Opus_FOUND)
+    set(SFML_AUDIO_HAS_OPUS TRUE)
+else()
+    set(SFML_AUDIO_HAS_OPUS FALSE)
+    message(STATUS "Building SFML without Ogg Opus support (Opus library not found or SFML_AUDIO_ENABLE_OPUS is OFF)")
+endif()
+
 # define the sfml-audio target
 sfml_add_library(Audio
                  SOURCES ${SRC} ${CODECS_SRC}
@@ -209,6 +224,13 @@ target_compile_definitions(sfml-audio PRIVATE SFML_IS_BIG_ENDIAN=$<STREQUAL:${CM
 target_link_libraries(sfml-audio
                       PUBLIC SFML::System
                       PRIVATE Vorbis::vorbis Vorbis::vorbisfile Vorbis::vorbisenc FLAC::FLAC Threads::Threads)
+
+# enable Ogg Opus decoding when the Opus library is available
+if(SFML_AUDIO_HAS_OPUS)
+    target_compile_definitions(sfml-audio PRIVATE SFML_HAS_OPUS)
+    target_link_libraries(sfml-audio PRIVATE Opus::opus)
+    set_property(GLOBAL PROPERTY SFML_AUDIO_HAS_OPUS TRUE)
+endif()
 if(SFML_OS_IOS)
     target_link_libraries(sfml-audio PRIVATE "-framework Foundation" "-framework CoreFoundation" "-framework CoreAudio" "-framework AudioToolbox" "-framework AVFoundation")
 endif()

@@ -40,6 +40,11 @@ else()
     find_dependency(FLAC CONFIG REQUIRED NO_DEFAULT_PATH)
 endif()
 
+# Opus support is optional: only look for it when SFML was built with it
+if(@SFML_AUDIO_HAS_OPUS@)
+    find_dependency(Opus)
+endif()
+
 if(FIND_SFML_DEPENDENCIES_NOTFOUND)
     set(FIND_SFML_ERROR "SFML found but some of its dependencies are missing (${FIND_SFML_DEPENDENCIES_NOTFOUND})")
     set(SFML_FOUND OFF)

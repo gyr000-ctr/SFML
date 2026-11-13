@@ -16,6 +16,12 @@ set(AUDIO_SRC
 )
 sfml_add_test(test-sfml-audio "${AUDIO_SRC}" SFML::Audio)
 
+# Opus decoding support is optional: only run the Opus tests when it is compiled in
+get_property(SFML_AUDIO_HAS_OPUS GLOBAL PROPERTY SFML_AUDIO_HAS_OPUS)
+if(SFML_AUDIO_HAS_OPUS)
+    target_compile_definitions(test-sfml-audio PRIVATE SFML_ENABLE_OPUS_TESTS)
+endif()
+
 if(SFML_OS_IOS)
     set(AUDIO_RESOURCE
         ding-🐌.flac
@@ -30,6 +36,18 @@ if(SFML_OS_IOS)
         killdeer-🐌.wav
         killdeer-ń.wav
         killdeer.wav
+        opus_bad_head_channels.opus
+        opus_bad_head_family.opus
+        opus_bad_head_magic.opus
+        opus_bad_tags.opus
+        opus_head_only.opus
+        opus_long_mono.opus
+        opus_missing_mapping.opus
+        opus_mono_16k.opus
+        opus_mono_44k.opus
+        opus_mono_48k.opus
+        opus_stereo_48k.opus
+        opus_truncated.opus
     )
     target_sources(test-sfml-audio PRIVATE ${AUDIO_RESOURCE})
     set_source_files_properties(${AUDIO_RESOURCE} PROPERTIES MACOSX_PACKAGE_LOCATION "Audio")

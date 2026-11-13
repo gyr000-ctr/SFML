@@ -104,6 +104,13 @@ TEST_CASE("[Audio] sf::SoundFileFactory")
             CHECK(sf::SoundFileFactory::createReaderFromFilename("ding.mp3"));
             CHECK(sf::SoundFileFactory::createReaderFromFilename("doodle_pop.ogg"));
             CHECK(sf::SoundFileFactory::createReaderFromFilename("killdeer.wav"));
+#ifdef SFML_ENABLE_OPUS_TESTS
+            CHECK(sf::SoundFileFactory::createReaderFromFilename("opus_mono_48k.opus"));
+            CHECK(sf::SoundFileFactory::createReaderFromFilename("opus_stereo_48k.opus"));
+#else
+            // Opus files are rejected cleanly when SFML is built without Opus support
+            CHECK(!sf::SoundFileFactory::createReaderFromFilename("opus_mono_48k.opus"));
+#endif
         }
     }
 
@@ -130,6 +137,13 @@ TEST_CASE("[Audio] sf::SoundFileFactory")
         {
             REQUIRE(stream.open("killdeer.wav"));
         }
+
+#ifdef SFML_ENABLE_OPUS_TESTS
+        SECTION("opus")
+        {
+            REQUIRE(stream.open("opus_mono_48k.opus"));
+        }
+#endif
 
         CHECK(sf::SoundFileFactory::createReaderFromStream(stream));
     }

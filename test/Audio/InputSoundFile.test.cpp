@@ -5,12 +5,15 @@
 #include <SFML/System/FileInputStream.hpp>
 #include <SFML/System/Time.hpp>
 
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 
 #include <SystemUtil.hpp>
+#include <algorithm>
 #include <array>
 #include <type_traits>
+#include <vector>
 
 TEST_CASE("[Audio] sf::InputSoundFile")
 {
@@ -74,6 +77,49 @@ TEST_CASE("[Audio] sf::InputSoundFile")
                 CHECK(inputSoundFile.getTimeOffset() == sf::Time::Zero);
                 CHECK(inputSoundFile.getSampleOffset() == 0);
             }
+
+#ifdef SFML_ENABLE_OPUS_TESTS
+            SECTION("opus mono")
+            {
+                const sf::InputSoundFile inputSoundFile("opus_mono_48k.opus");
+                CHECK(inputSoundFile.getSampleCount() == 48'000);
+                CHECK(inputSoundFile.getChannelCount() == 1);
+                CHECK(inputSoundFile.getSampleRate() == 48'000);
+                CHECK(inputSoundFile.getDuration() == sf::microseconds(1'000'000));
+                CHECK(inputSoundFile.getTimeOffset() == sf::Time::Zero);
+                CHECK(inputSoundFile.getSampleOffset() == 0);
+            }
+
+            SECTION("opus stereo")
+            {
+                const sf::InputSoundFile inputSoundFile("opus_stereo_48k.opus");
+                CHECK(inputSoundFile.getSampleCount() == 96'000);
+                CHECK(inputSoundFile.getChannelCount() == 2);
+                CHECK(inputSoundFile.getSampleRate() == 48'000);
+                CHECK(inputSoundFile.getDuration() == sf::microseconds(1'000'000));
+                CHECK(inputSoundFile.getTimeOffset() == sf::Time::Zero);
+                CHECK(inputSoundFile.getSampleOffset() == 0);
+            }
+
+            SECTION("opus 44.1 kHz source")
+            {
+                // Opus always decodes at 48 kHz, regardless of the sample rate of the encoded source
+                const sf::InputSoundFile inputSoundFile("opus_mono_44k.opus");
+                CHECK(inputSoundFile.getSampleCount() == 48'000);
+                CHECK(inputSoundFile.getChannelCount() == 1);
+                CHECK(inputSoundFile.getSampleRate() == 48'000);
+                CHECK(inputSoundFile.getDuration() == sf::microseconds(1'000'000));
+            }
+
+            SECTION("opus 16 kHz source")
+            {
+                const sf::InputSoundFile inputSoundFile("opus_mono_16k.opus");
+                CHECK(inputSoundFile.getSampleCount() == 48'000);
+                CHECK(inputSoundFile.getChannelCount() == 1);
+                CHECK(inputSoundFile.getSampleRate() == 48'000);
+                CHECK(inputSoundFile.getDuration() == sf::microseconds(1'000'000));
+            }
+#endif
 
             SECTION("wav")
             {
@@ -206,6 +252,19 @@ TEST_CASE("[Audio] sf::InputSoundFile")
                 CHECK(inputSoundFile.getSampleOffset() == 0);
             }
 
+#ifdef SFML_ENABLE_OPUS_TESTS
+            SECTION("opus")
+            {
+                REQUIRE(inputSoundFile.openFromFile("opus_stereo_48k.opus"));
+                CHECK(inputSoundFile.getSampleCount() == 96'000);
+                CHECK(inputSoundFile.getChannelCount() == 2);
+                CHECK(inputSoundFile.getSampleRate() == 48'000);
+                CHECK(inputSoundFile.getDuration() == sf::microseconds(1'000'000));
+                CHECK(inputSoundFile.getTimeOffset() == sf::Time::Zero);
+                CHECK(inputSoundFile.getSampleOffset() == 0);
+            }
+#endif
+
             SECTION("wav")
             {
                 const std::filesystem::path filename = U"killdeer" + filenameSuffix + U".wav";
@@ -224,15 +283,33 @@ TEST_CASE("[Audio] sf::InputSoundFile")
 
     SECTION("openFromMemory()")
     {
-        const auto         memory = loadIntoMemory("killdeer.wav");
-        sf::InputSoundFile inputSoundFile;
-        REQUIRE(inputSoundFile.openFromMemory(memory.data(), memory.size()));
-        CHECK(inputSoundFile.getSampleCount() == 112'941);
-        CHECK(inputSoundFile.getChannelCount() == 1);
-        CHECK(inputSoundFile.getSampleRate() == 22'050);
-        CHECK(inputSoundFile.getDuration() == sf::microseconds(5'122'040));
-        CHECK(inputSoundFile.getTimeOffset() == sf::Time::Zero);
-        CHECK(inputSoundFile.getSampleOffset() == 0);
+        SECTION("wav")
+        {
+            const auto         memory = loadIntoMemory("killdeer.wav");
+            sf::InputSoundFile inputSoundFile;
+            REQUIRE(inputSoundFile.openFromMemory(memory.data(), memory.size()));
+            CHECK(inputSoundFile.getSampleCount() == 112'941);
+            CHECK(inputSoundFile.getChannelCount() == 1);
+            CHECK(inputSoundFile.getSampleRate() == 22'050);
+            CHECK(inputSoundFile.getDuration() == sf::microseconds(5'122'040));
+            CHECK(inputSoundFile.getTimeOffset() == sf::Time::Zero);
+            CHECK(inputSoundFile.getSampleOffset() == 0);
+        }
+
+#ifdef SFML_ENABLE_OPUS_TESTS
+        SECTION("opus")
+        {
+            const auto         memory = loadIntoMemory("opus_mono_48k.opus");
+            sf::InputSoundFile inputSoundFile;
+            REQUIRE(inputSoundFile.openFromMemory(memory.data(), memory.size()));
+            CHECK(inputSoundFile.getSampleCount() == 48'000);
+            CHECK(inputSoundFile.getChannelCount() == 1);
+            CHECK(inputSoundFile.getSampleRate() == 48'000);
+            CHECK(inputSoundFile.getDuration() == sf::microseconds(1'000'000));
+            CHECK(inputSoundFile.getTimeOffset() == sf::Time::Zero);
+            CHECK(inputSoundFile.getSampleOffset() == 0);
+        }
+#endif
     }
 
     SECTION("openFromStream()")
@@ -283,6 +360,20 @@ TEST_CASE("[Audio] sf::InputSoundFile")
                 CHECK(inputSoundFile.getSampleOffset() == 0);
             }
 
+#ifdef SFML_ENABLE_OPUS_TESTS
+            SECTION("opus")
+            {
+                REQUIRE(stream.open("opus_stereo_48k.opus"));
+                REQUIRE(inputSoundFile.openFromStream(stream));
+                CHECK(inputSoundFile.getSampleCount() == 96'000);
+                CHECK(inputSoundFile.getChannelCount() == 2);
+                CHECK(inputSoundFile.getSampleRate() == 48'000);
+                CHECK(inputSoundFile.getDuration() == sf::microseconds(1'000'000));
+                CHECK(inputSoundFile.getTimeOffset() == sf::Time::Zero);
+                CHECK(inputSoundFile.getSampleOffset() == 0);
+            }
+#endif
+
             SECTION("wav")
             {
                 REQUIRE(stream.open("killdeer.wav"));
@@ -322,6 +413,16 @@ TEST_CASE("[Audio] sf::InputSoundFile")
             CHECK(inputSoundFile.getTimeOffset() == sf::microseconds(11'337));
             CHECK(inputSoundFile.getSampleOffset() == 1'000);
         }
+
+#ifdef SFML_ENABLE_OPUS_TESTS
+        SECTION("opus")
+        {
+            sf::InputSoundFile inputSoundFile("opus_mono_48k.opus");
+            inputSoundFile.seek(1'000);
+            CHECK(inputSoundFile.getTimeOffset() == sf::microseconds(20'833));
+            CHECK(inputSoundFile.getSampleOffset() == 1'000);
+        }
+#endif
 
         SECTION("wav")
         {
@@ -389,6 +490,20 @@ TEST_CASE("[Audio] sf::InputSoundFile")
                 CHECK(samples == std::array<std::int16_t, 4>{-1738, -1883, -2358, -2497});
             }
 
+#ifdef SFML_ENABLE_OPUS_TESTS
+            SECTION("opus")
+            {
+                // Decoded output is compared against an opusdec reference
+                // decoding with a margin for codec implementation differences
+                inputSoundFile = sf::InputSoundFile("opus_mono_48k.opus");
+                CHECK(inputSoundFile.read(samples.data(), samples.size()) == 4);
+                CHECK(samples[0] == Catch::Approx(339).margin(32));
+                CHECK(samples[1] == Catch::Approx(1178).margin(32));
+                CHECK(samples[2] == Catch::Approx(2168).margin(32));
+                CHECK(samples[3] == Catch::Approx(3020).margin(32));
+            }
+#endif
+
             SECTION("wav")
             {
                 // Cannot be tested since reading from a .wav file triggers UB
@@ -407,4 +522,115 @@ TEST_CASE("[Audio] sf::InputSoundFile")
         CHECK(inputSoundFile.getTimeOffset() == sf::Time::Zero);
         CHECK(inputSoundFile.getSampleOffset() == 0);
     }
+
+#ifdef SFML_ENABLE_OPUS_TESTS
+    SECTION("opus seek and loop")
+    {
+        sf::InputSoundFile inputSoundFile("opus_stereo_48k.opus");
+
+        // Decode the whole file in small chunks to exercise streaming reads
+        std::vector<std::int16_t>  allSamples(inputSoundFile.getSampleCount());
+        std::uint64_t              totalRead = 0;
+        std::array<std::int16_t, 997> chunk{};
+        while (const std::uint64_t count = inputSoundFile.read(chunk.data(), chunk.size()))
+        {
+            std::copy_n(chunk.data(), count, allSamples.begin() + static_cast<std::ptrdiff_t>(totalRead));
+            totalRead += count;
+        }
+        CHECK(totalRead == inputSoundFile.getSampleCount());
+
+        // End of file reached: further reads return nothing
+        CHECK(inputSoundFile.read(chunk.data(), chunk.size()) == 0);
+
+        // Seeking must land on sample-exact positions
+        std::array<std::int16_t, 512> samples{};
+        inputSoundFile.seek(12'344);
+        CHECK(inputSoundFile.getSampleOffset() == 12'344);
+        CHECK(inputSoundFile.read(samples.data(), samples.size()) == samples.size());
+        CHECK(std::equal(samples.begin(), samples.end(), allSamples.begin() + 12'344));
+
+        // Seeking near the end of the file
+        inputSoundFile.seek(inputSoundFile.getSampleCount() - 100);
+        CHECK(inputSoundFile.read(samples.data(), samples.size()) == 100);
+        CHECK(std::equal(samples.begin(), samples.begin() + 100, allSamples.end() - 100));
+
+        // Seeking beyond the end of the file jumps to the end
+        inputSoundFile.seek(inputSoundFile.getSampleCount() + 1'000);
+        CHECK(inputSoundFile.read(samples.data(), samples.size()) == 0);
+
+        // Seeking back to the beginning (as done when looping) restarts playback exactly
+        inputSoundFile.seek(0);
+        CHECK(inputSoundFile.getSampleOffset() == 0);
+        CHECK(inputSoundFile.read(samples.data(), samples.size()) == samples.size());
+        CHECK(std::equal(samples.begin(), samples.end(), allSamples.begin()));
+    }
+
+    SECTION("opus long file seek")
+    {
+        sf::InputSoundFile inputSoundFile("opus_long_mono.opus");
+        REQUIRE(inputSoundFile.getSampleCount() == 1'440'000);
+        REQUIRE(inputSoundFile.getChannelCount() == 1);
+        REQUIRE(inputSoundFile.getSampleRate() == 48'000);
+        CHECK(inputSoundFile.getDuration() == sf::microseconds(30'000'000));
+
+        // Decode the whole file as a reference
+        std::vector<std::int16_t>   allSamples(inputSoundFile.getSampleCount());
+        std::uint64_t               totalRead = 0;
+        std::array<std::int16_t, 8192> chunk{};
+        while (const std::uint64_t count = inputSoundFile.read(chunk.data(), chunk.size()))
+        {
+            std::copy_n(chunk.data(), count, allSamples.begin() + static_cast<std::ptrdiff_t>(totalRead));
+            totalRead += count;
+        }
+        REQUIRE(totalRead == inputSoundFile.getSampleCount());
+
+        // Seeking across the whole file must produce sample-exact positions,
+        // including when jumping backwards
+        std::array<std::int16_t, 512> samples{};
+        for (const std::uint64_t offset : {1ULL, 61'723ULL, 480'000ULL, 1'000'000ULL, 1'439'000ULL, 100ULL, 1'439'000ULL})
+        {
+            INFO("Seek offset: " << offset);
+            inputSoundFile.seek(offset);
+            CHECK(inputSoundFile.getSampleOffset() == offset);
+            CHECK(inputSoundFile.read(samples.data(), samples.size()) == samples.size());
+            CHECK(std::equal(samples.begin(), samples.end(), allSamples.begin() + static_cast<std::ptrdiff_t>(offset)));
+        }
+    }
+
+    SECTION("opus invalid files")
+    {
+        sf::InputSoundFile inputSoundFile;
+        CHECK(!inputSoundFile.openFromFile("opus_head_only.opus"));         // missing OpusTags header
+        CHECK(!inputSoundFile.openFromFile("opus_bad_tags.opus"));          // corrupted OpusTags magic
+        CHECK(!inputSoundFile.openFromFile("opus_bad_head_magic.opus"));    // corrupted OpusHead magic
+        CHECK(!inputSoundFile.openFromFile("opus_bad_head_channels.opus")); // unsupported channel count
+        CHECK(!inputSoundFile.openFromFile("opus_bad_head_family.opus"));   // reserved channel mapping family
+        CHECK(!inputSoundFile.openFromFile("opus_missing_mapping.opus"));   // missing channel mapping table
+    }
+
+    SECTION("opus truncated file")
+    {
+        // A file cut in the middle of an audio page opens with a shorter duration
+        sf::InputSoundFile inputSoundFile;
+        REQUIRE(inputSoundFile.openFromFile("opus_truncated.opus"));
+        CHECK(inputSoundFile.getChannelCount() == 2);
+        CHECK(inputSoundFile.getSampleRate() == 48'000);
+        CHECK(inputSoundFile.getSampleCount() == 95'376);
+        CHECK(inputSoundFile.getDuration() == sf::microseconds(993'500));
+
+        // The whole remaining file can be read without errors
+        std::uint64_t               totalRead = 0;
+        std::array<std::int16_t, 4096> chunk{};
+        while (const std::uint64_t count = inputSoundFile.read(chunk.data(), chunk.size()))
+            totalRead += count;
+        CHECK(totalRead == inputSoundFile.getSampleCount());
+    }
+#else
+    SECTION("opus files are rejected when Opus support is disabled")
+    {
+        sf::InputSoundFile inputSoundFile;
+        CHECK(!inputSoundFile.openFromFile("opus_mono_48k.opus"));
+        CHECK(!inputSoundFile.openFromFile("opus_stereo_48k.opus"));
+    }
+#endif
 }
