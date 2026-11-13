@@ -526,16 +526,6 @@ private:
     IntRect findGlyphRect(Page& page, Vector2u size) const;
 
     ////////////////////////////////////////////////////////////
-    /// \brief Make sure that the given size is the current one
-    ///
-    /// \param characterSize Reference character size
-    ///
-    /// \return `true` on success, `false` if any error happened
-    ///
-    ////////////////////////////////////////////////////////////
-    [[nodiscard]] bool setCurrentSize(unsigned int characterSize) const;
-
-    ////////////////////////////////////////////////////////////
     /// Handle
     ////////////////////////////////////////////////////////////
     using FontHandle = void*; //!< Font handle used by the shaper
@@ -552,6 +542,19 @@ private:
     ///
     ////////////////////////////////////////////////////////////
     [[nodiscard]] FontHandle getFontHandle() const;
+
+    ////////////////////////////////////////////////////////////
+    /// \brief Make sure that the given size is the current one
+    ///
+    /// This is used internally by Text before shaping or rasterizing
+    /// glyphs with a (possibly fallback) font.
+    ///
+    /// \param characterSize Reference character size
+    ///
+    /// \return `true` on success, `false` if any error happened
+    ///
+    ////////////////////////////////////////////////////////////
+    [[nodiscard]] bool setCurrentSize(unsigned int characterSize) const;
 
     ////////////////////////////////////////////////////////////
     // Types

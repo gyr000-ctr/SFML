@@ -36,7 +36,9 @@
 #include <iterator>
 #include <limits>
 #include <mutex>
+#include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include <cassert>
 #include <cctype>
@@ -424,9 +426,67 @@ void Text::setFont(const Font& font)
 {
     if (m_font != &font)
     {
-        m_font               = &font;
-        m_geometryNeedUpdate = true;
+        m_font = &font;
+        invalidateFontConfiguration();
     }
+}
+
+
+////////////////////////////////////////////////////////////
+void Text::addFallbackFont(const Font& font)
+{
+    // Reject empty fonts: they have no font handle and can never provide glyphs
+    if (!font.getFontHandle())
+        return;
+
+    // A flat fallback list is used, so fonts already present (including the
+    // primary font) are not added again. This also makes the configuration
+    // acyclic by construction: there are no recursive references to follow.
+    if (&font == m_font)
+        return;
+
+    if (std::find(m_fallbackFonts.begin(), m_fallbackFonts.end(), &font) != m_fallbackFonts.end())
+        return;
+
+    m_fallbackFonts.push_back(&font);
+    invalidateFontConfiguration();
+}
+
+
+////////////////////////////////////////////////////////////
+void Text::removeFallbackFont(const Font& font)
+{
+    const auto before = m_fallbackFonts.size();
+    m_fallbackFonts.erase(std::remove(m_fallbackFonts.begin(), m_fallbackFonts.end(), &font), m_fallbackFonts.end());
+
+    if (m_fallbackFonts.size() != before)
+        invalidateFontConfiguration();
+}
+
+
+////////////////////////////////////////////////////////////
+void Text::clearFallbackFonts()
+{
+    if (m_fallbackFonts.empty())
+        return;
+
+    m_fallbackFonts.clear();
+    invalidateFontConfiguration();
+}
+
+
+////////////////////////////////////////////////////////////
+const std::vector<const Font*>& Text::getFallbackFonts() const
+{
+    return m_fallbackFonts;
+}
+
+
+////////////////////////////////////////////////////////////
+void Text::invalidateFontConfiguration()
+{
+    m_geometryNeedUpdate = true;
+    m_coverageCache.clear();
 }
 
 
@@ -554,6 +614,43 @@ const String& Text::getString() const
 const Font& Text::getFont() const
 {
     return *m_font;
+}
+
+
+////////////////////////////////////////////////////////////
+const Font& Text::resolveFallbackFont(char32_t codePoint) const
+{
+    // Cache the resolution so that per-frame geometry rebuilds only perform
+    // the character map lookups once per distinct code point instead of once
+    // per character per frame. The cache is cleared whenever the primary or
+    // fallback fonts change, so it never holds a stale resolution.
+    if (const auto it = m_coverageCache.find(codePoint); it != m_coverageCache.end())
+        return *it->second;
+
+    const Font* result = m_font;
+
+    if (m_font->hasGlyph(codePoint))
+    {
+        result = m_font;
+    }
+    else
+    {
+        // Consult the fallback fonts in configuration order and use the first
+        // one that covers the code point. If none of them does, the primary
+        // font is kept and will render its own missing glyph, which gives a
+        // deterministic result for code points no configured font supports.
+        for (const Font* fallback : m_fallbackFonts)
+        {
+            if (fallback->hasGlyph(codePoint))
+            {
+                result = fallback;
+                break;
+            }
+        }
+    }
+
+    m_coverageCache.emplace(codePoint, result);
+    return *result;
 }
 
 
@@ -743,35 +840,76 @@ void Text::draw(RenderTarget& target, RenderStates states) const
     ensureGeometryUpdate();
 
     states.transform *= getTransform();
-    states.texture        = &m_font->getTexture(m_characterSize);
     states.coordinateType = CoordinateType::Pixels;
 
-    // Only draw the outline if there is something to draw
-    if (m_outlineVertices.getVertexCount() > 0)
-        target.draw(m_outlineVertices, states);
+    // The geometry can reference glyph textures from more than one font when
+    // fallback fonts are used. The vertices were appended in font runs, so the
+    // fill and outline arrays are drawn as contiguous per-texture ranges.
+    // Underline/strikethrough decoration only samples the 2x2 white pixel that
+    // every font page reserves at the origin of its texture.
+    auto drawRanges = [&](const VertexArray& vertices, const std::vector<std::pair<const Font*, std::pair<std::size_t, std::size_t>>>& ranges)
+    {
+        if (vertices.getVertexCount() == 0)
+            return;
 
-    target.draw(m_vertices, states);
+        for (const auto& [font, range] : ranges)
+        {
+            const auto& [firstVertex, vertexCount] = range;
+
+            if (vertexCount == 0)
+                continue;
+
+            states.texture = &font->getTexture(m_characterSize);
+            target.draw(&vertices[firstVertex], vertexCount, PrimitiveType::Triangles, states);
+        }
+    };
+
+    drawRanges(m_outlineVertices, m_outlineDrawRanges);
+    drawRanges(m_vertices, m_fillDrawRanges);
 }
 
 
 ////////////////////////////////////////////////////////////
 void Text::ensureGeometryUpdate() const
 {
-    // Do nothing, if geometry has not changed and the font texture has not changed
-    if (!m_geometryNeedUpdate && m_font->getTexture(m_characterSize).m_cacheId == m_fontTextureId)
-        return;
+    // Do nothing, if geometry has not changed and none of the glyph textures
+    // that the current geometry samples have changed. The set of fonts used by
+    // the geometry and their texture cache ids are snapshotted at the end of
+    // every rebuild, so a fallback lookup on its own never forces a rebuild.
+    // An empty snapshot means the geometry has never been built yet.
+    if (!m_geometryNeedUpdate && !m_fontTextureIds.empty())
+    {
+        bool texturesUnchanged = true;
 
-    // Save the current fonts texture id
-    m_fontTextureId = m_font->getTexture(m_characterSize).m_cacheId;
+        for (const auto& [font, cacheId] : m_fontTextureIds)
+        {
+            if (font->getTexture(m_characterSize).m_cacheId != cacheId)
+            {
+                texturesUnchanged = false;
+                break;
+            }
+        }
+
+        if (texturesUnchanged)
+            return;
+    }
 
     // Mark geometry as updated
     m_geometryNeedUpdate = false;
+
+    // Rebuild the coverage resolution from scratch. The cache is also cleared
+    // when the font configuration changes, but rebuilding here as well keeps
+    // the resolution consistent if a referenced font is reopened in place.
+    m_coverageCache.clear();
 
     // Clear the previous geometry
     m_vertices.clear();
     m_outlineVertices.clear();
     m_glyphs.clear();
-    m_bounds = FloatRect();
+    m_bounds            = FloatRect();
+    m_fillDrawRanges.clear();
+    m_outlineDrawRanges.clear();
+    m_fontTextureIds.clear();
 
     // No text: nothing to draw
     if (m_string.isEmpty())
@@ -802,18 +940,71 @@ void Text::ensureGeometryUpdate() const
     auto maxX = 0.0f;
     auto maxY = 0.0f;
 
-    // Check that we have a usable font
-    const auto  fontId     = m_font->getInfo().id;
-    auto* const fontHandle = m_font->getFontHandle();
+    // Check that we have a usable primary font
+    const auto primaryFontId     = m_font->getInfo().id;
+    auto* const primaryFontHandle = m_font->getFontHandle();
 
-    assert(fontId && fontHandle && "Font not usable for shaping text");
+    assert(primaryFontId && primaryFontHandle && "Font not usable for shaping text");
 
-    // Ensure the font is set to the size expected by the shaper
+    // Ensure the primary font is set to the size expected by the shaper.
+    // Fallback fonts are sized lazily when their shapers are first requested.
     if (!m_font->setCurrentSize(m_characterSize))
     {
         assert(false && "Failed to set font size");
         return;
     }
+
+    // Set of fonts that contribute glyphs to the geometry. The primary font is
+    // always part of it so that underline/strikethrough decoration and missing
+    // glyphs keep sampling its texture.
+    std::vector<const Font*> fontsInUse{m_font};
+
+    // Remember that a font already has an entry in one of the draw-range lists
+    auto registerFont = [&](const Font& font)
+    {
+        if (std::find(fontsInUse.begin(), fontsInUse.end(), &font) == fontsInUse.end())
+            fontsInUse.push_back(&font);
+    };
+
+    // Append a vertex range that samples the glyph texture of the given font.
+    // Consecutive glyph runs using the same font extend the current range
+    // instead of creating a new one, keeping the number of draw calls bounded
+    // by the number of font runs rather than the number of glyphs.
+    auto appendDrawRange = [](std::vector<std::pair<const Font*, std::pair<std::size_t, std::size_t>>>& ranges,
+                              const Font&                                                                     font,
+                              std::size_t                                                                    firstVertex,
+                              std::size_t                                                                    vertexCount)
+    {
+        if (vertexCount == 0)
+            return;
+
+        if (!ranges.empty() && ranges.back().first == &font)
+        {
+            ranges.back().second.second += vertexCount;
+            return;
+        }
+
+        ranges.emplace_back(&font, std::make_pair(firstVertex, vertexCount));
+    };
+
+    // Obtain a shaper for a specific font, creating it on first use. The
+    // shaper cache itself is shared between all sf::Text objects, keyed on the
+    // font id and character size.
+    const auto getShaperForFont = [&](const Font& font) -> std::shared_ptr<ShaperImpl>
+    {
+        const auto  fontId     = font.getInfo().id;
+        auto* const fontHandle = font.getFontHandle();
+
+        assert(fontId && fontHandle && "Font not usable for shaping text");
+
+        if (!font.setCurrentSize(m_characterSize))
+        {
+            assert(false && "Failed to set font size");
+            return nullptr;
+        }
+
+        return ShaperImpl::getShaper(fontHandle, fontId, m_characterSize);
+    };
 
     // Shaping only supports single lines, we will need to
     // break multi-line strings into individual lines ourselves
@@ -823,22 +1014,426 @@ void Text::ensureGeometryUpdate() const
     hb_script_t                currentScript{};
     hb_direction_t             currentDirection{};
 
-    const auto outputLine = [&]
+    // A sub-run groups consecutive input characters that are shaped by the
+    // same font. The whole line is split into such runs before shaping so
+    // that every run goes through HarfBuzz as an independent unit.
+    struct SubRun
     {
-        if (!m_shaper || m_shaper->fontId != fontId || m_shaper->characterSize != m_characterSize)
+        const Font*                 font{};
+        sf::String                  text;
+        std::vector<std::uint32_t>  indices;
+        std::vector<std::uint32_t>  tabIndices;
+    };
+
+    // Split the current line into maximal sub-runs of a single font. The
+    // decision is made per grapheme cluster: combining marks and other
+    // multiple-code-point clusters stay with the font chosen for their first
+    // code point and are therefore never split across fonts mid-cluster.
+    const auto splitIntoSubRuns = [&]
+    {
+        std::vector<SubRun> runs;
+
+        const std::size_t length = currentLine.getSize();
+
+        for (std::size_t i = 0; i < length;)
         {
-            // We need to get a new shaper implementation
-            m_shaper = ShaperImpl::getShaper(fontHandle, fontId, m_characterSize);
+            // Find the end of the grapheme cluster starting at i
+            std::size_t next = i + 1;
+            while (next < length && !m_string.isGraphemeBoundary(currentLineIndices[next]))
+                ++next;
+
+            // Resolve the font for the whole cluster from its first code point
+            const Font& font = resolveFallbackFont(currentLine[i]);
+
+            if (runs.empty() || runs.back().font != &font)
+                runs.emplace_back().font = &font;
+
+            SubRun& run = runs.back();
+
+            for (std::size_t j = i; j < next; ++j)
+            {
+                run.text += currentLine[j];
+                run.indices.push_back(currentLineIndices[j]);
+            }
+
+            i = next;
         }
 
-        const auto shapeOutput = m_shaper->shape(currentLine,
-                                                 currentLineIndices,
-                                                 currentScript,
-                                                 currentDirection,
-                                                 m_textOrientation,
-                                                 m_clusterGrouping,
-                                                 m_outlineThickness,
-                                                 m_style & Bold);
+        // Recover which clusters are tab clusters: every entry in
+        // currentLineTabIndices marks the first of the four spaces that a tab
+        // was expanded to. The spaces are consecutive entries with the same
+        // original cluster index, so propagate the marker to the run that owns
+        // them; it needs it to re-merge the four spaces into one wide glyph.
+        if (!currentLineTabIndices.empty())
+        {
+            for (const std::uint32_t tabIndex : currentLineTabIndices)
+            {
+                const auto runIt = std::find_if(runs.begin(),
+                                                runs.end(),
+                                                [&](const SubRun& run)
+                                                {
+                                                    return std::find(run.indices.begin(), run.indices.end(), tabIndex) !=
+                                                           run.indices.end();
+                                                });
+
+                if (runIt != runs.end() &&
+                    std::find(runIt->tabIndices.begin(), runIt->tabIndices.end(), tabIndex) == runIt->tabIndices.end())
+                {
+                    runIt->tabIndices.push_back(tabIndex);
+                }
+            }
+        }
+
+        return runs;
+    };
+
+    const auto outputLine = [&]
+    {
+        // Without any fallback font configured, the primary font shapes the
+        // whole line exactly as before, so the established output is preserved
+        // bit for bit.
+        if (m_fallbackFonts.empty())
+        {
+            if (!m_shaper || m_shaper->fontId != primaryFontId || m_shaper->characterSize != m_characterSize)
+            {
+                // We need to get a new shaper implementation
+                m_shaper = ShaperImpl::getShaper(primaryFontHandle, primaryFontId, m_characterSize);
+            }
+
+            const auto shapeOutput = m_shaper->shape(currentLine,
+                                                     currentLineIndices,
+                                                     currentScript,
+                                                     currentDirection,
+                                                     m_textOrientation,
+                                                     m_clusterGrouping,
+                                                     m_outlineThickness,
+                                                     m_style & Bold);
+
+            // Variables used to compute bounds for the current line
+            auto lineMinX = static_cast<float>(m_characterSize);
+            auto lineMinY = static_cast<float>(m_characterSize);
+            auto lineMaxX = 0.0f;
+            auto lineMaxY = 0.0f;
+
+            // Track widths and y positions of underline segments when applying underline to vertical text
+            struct VerticalUnderlineEntry
+            {
+                sf::Vector2f position;
+                float        width{};
+            };
+
+            std::vector<VerticalUnderlineEntry> verticalUnderlineData;
+
+            if (m_textOrientation != TextOrientation::Default)
+                verticalUnderlineData.reserve(shapeOutput.size());
+
+            // We want to combine the multiple spaces we substituted a tab with back into a single glyph
+            // To do that we just enlarge the first of its shaped spaces to 4 times its width
+            // We then skip the following 3 spaces
+            auto glyphsToSkip = 0;
+
+            // Create one quad for each character
+            for (const auto& shapeGlyph : shapeOutput)
+            {
+                // Skip trailing spaces of a tab
+                if (glyphsToSkip > 0)
+                {
+                    --glyphsToSkip;
+                    continue;
+                }
+
+                // Extract the current glyph's description
+                const Glyph& glyph = m_font->getGlyphById(shapeGlyph.id, m_characterSize, isBold);
+
+                // Add the glyph to the glyph list
+                auto& glyphEntry    = m_glyphs.emplace_back(ShapedGlyph{glyph, m_font, {}, {}, {}});
+                glyphEntry.cluster  = shapeGlyph.cluster;
+                glyphEntry.position = sf::Vector2f{x, y} + shapeGlyph.offset;
+                auto isHorizontal   = false;
+                auto isVertical     = false;
+
+                switch (shapeGlyph.direction)
+                {
+                    case HB_DIRECTION_LTR:
+                        glyphEntry.textDirection = TextDirection::LeftToRight;
+                        glyphEntry.glyph.advance = shapeGlyph.advance.x;
+                        glyphEntry.baseline      = y;
+                        isHorizontal             = true;
+                        break;
+                    case HB_DIRECTION_RTL:
+                        glyphEntry.textDirection = TextDirection::RightToLeft;
+                        glyphEntry.glyph.advance = shapeGlyph.advance.x;
+                        glyphEntry.baseline      = y;
+                        isHorizontal             = true;
+                        break;
+                    case HB_DIRECTION_TTB:
+                        glyphEntry.textDirection = TextDirection::TopToBottom;
+                        glyphEntry.glyph.advance = shapeGlyph.advance.y;
+                        glyphEntry.baseline      = x;
+                        isVertical               = true;
+                        break;
+                    case HB_DIRECTION_BTT:
+                        glyphEntry.textDirection = TextDirection::BottomToTop;
+                        glyphEntry.glyph.advance = shapeGlyph.advance.y;
+                        glyphEntry.baseline      = x;
+                        isVertical               = true;
+                        break;
+                    default:
+                        glyphEntry.textDirection = TextDirection::Unspecified;
+                        break;
+                }
+
+                std::uint32_t style            = m_style;
+                Color         fillColor        = m_fillColor;
+                Color         outlineColor     = m_outlineColor;
+                float         outlineThickness = m_outlineThickness;
+                float         italicShear      = 0.0f;
+
+                // Add the glyph to the vertices, if the texture rect has an area
+                // (not the case with transparent glyphs e.g. space character)
+                if (glyph.textureRect.size.x != 0 && glyph.textureRect.size.y != 0)
+                {
+                    if (m_glyphPreProcessor)
+                        m_glyphPreProcessor(glyphEntry, style, fillColor, outlineColor, outlineThickness);
+
+                    italicShear = (style & Italic) ? degrees(12).asRadians() : 0.0f;
+
+                    // Apply the outline
+                    if (outlineThickness != 0)
+                    {
+                        const Glyph& outlineGlyph = m_font->getGlyphById(shapeGlyph.id, m_characterSize, style & Bold, outlineThickness);
+
+                        const std::size_t firstVertex = m_outlineVertices.getVertexCount();
+                        // Add the outline glyph to the vertices
+                        addGlyphQuad(m_outlineVertices, glyphEntry.position, outlineColor, outlineGlyph, italicShear);
+                        appendDrawRange(m_outlineDrawRanges,
+                                        *m_font,
+                                        firstVertex,
+                                        m_outlineVertices.getVertexCount() - firstVertex);
+                    }
+
+                    glyphEntry.vertexOffset = m_vertices.getVertexCount();
+
+                    const Glyph& fillGlyph = m_font->getGlyphById(shapeGlyph.id, m_characterSize, style & Bold);
+                    const std::size_t firstVertex = m_vertices.getVertexCount();
+                    addGlyphQuad(m_vertices, glyphEntry.position, fillColor, fillGlyph, italicShear);
+                    glyphEntry.vertexCount = m_vertices.getVertexCount() - glyphEntry.vertexOffset;
+                    appendDrawRange(m_fillDrawRanges, *m_font, firstVertex, m_vertices.getVertexCount() - firstVertex);
+                }
+                else
+                {
+                    // Remove unwanted x-offset when dealing with vertical spaces
+                    if ((shapeGlyph.direction == HB_DIRECTION_TTB) || (shapeGlyph.direction == HB_DIRECTION_BTT))
+                        glyphEntry.position.x -= shapeGlyph.offset.x;
+
+                    // Check if we are dealing with the start of a tab
+                    if (std::find(currentLineTabIndices.begin(), currentLineTabIndices.end(), shapeGlyph.cluster) !=
+                        currentLineTabIndices.end())
+                    {
+                        // Widen the size to 4 times the advance of the space glyph
+                        glyphEntry.glyph.advance *= 4.0f;
+
+                        if (isHorizontal)
+                        {
+                            glyphEntry.glyph.bounds.size.x = glyphEntry.glyph.advance;
+                        }
+                        else if (isVertical)
+                        {
+                            glyphEntry.glyph.bounds.size.y = glyphEntry.glyph.advance;
+                        }
+
+                        // Skip the next 3 space glyphs
+                        glyphsToSkip = 3;
+                    }
+                    else
+                    {
+                        // If the glyph doesn't have a texture it is probably a space
+                        // Set the bounds width to the width of the space so the user can
+                        // make use of it
+                        if (isHorizontal)
+                        {
+                            glyphEntry.glyph.bounds.size = {shapeGlyph.advance.x + letterSpacing, 0.0f};
+                        }
+                        else if (isVertical)
+                        {
+                            glyphEntry.glyph.bounds.size = {0.0f, shapeGlyph.advance.y + letterSpacing};
+                        }
+                    }
+
+                    if (m_glyphPreProcessor)
+                        m_glyphPreProcessor(glyphEntry, style, fillColor, outlineColor, outlineThickness);
+
+                    italicShear = (style & Italic) ? degrees(12).asRadians() : 0.0f;
+                }
+
+                // Update the current bounds
+                const Vector2f p1 = glyph.bounds.position + shapeGlyph.offset;
+                const Vector2f p2 = p1 + glyphEntry.glyph.bounds.size;
+
+                lineMinX = std::min(lineMinX, x + p1.x - italicShear * p2.y);
+                lineMaxX = std::max(lineMaxX, x + p2.x - italicShear * p1.y);
+                lineMinY = std::min(lineMinY, y + p1.y);
+                lineMaxY = std::max(lineMaxY, y + p2.y);
+
+                // Advance to the next character
+                // Only apply additional letter spacing if the current glyph has an advance (base glyph)
+                // Applying the letter spacing to glyphs without an advance would affect
+                // mark glyphs as well which would lead to incorrect results
+                const auto hasAdvance = glyphEntry.glyph.advance > 0.0f;
+
+                if (isHorizontal)
+                {
+                    x += glyphEntry.glyph.advance + (hasAdvance ? letterSpacing : 0.0f);
+                }
+                else if (isVertical)
+                {
+                    // We only add data to the vertical underline list for base glyphs
+                    if (isUnderlined && hasAdvance)
+                        verticalUnderlineData.emplace_back(
+                            VerticalUnderlineEntry{glyphEntry.position + sf::Vector2f(glyphEntry.glyph.bounds.position.x, 0.0f),
+                                                   glyphEntry.glyph.bounds.size.x});
+
+                    y += glyphEntry.glyph.advance + (hasAdvance ? letterSpacing : 0.0f);
+                }
+            }
+
+            // Update the multi-line bounds
+            minX = std::min(minX, lineMinX);
+            maxX = std::max(maxX, lineMaxX);
+            minY = std::min(minY, lineMinY);
+            maxY = std::max(maxY, lineMaxY);
+
+            // If we're using the underlined style and there's a new line, draw a line
+            if (isUnderlined)
+            {
+                if (m_textOrientation == TextOrientation::Default)
+                {
+                    const std::size_t firstVertex = m_vertices.getVertexCount();
+                    addLineHorizontal(m_vertices, 0.0f, x, y, m_fillColor, underlineOffset, underlineThickness);
+                    appendDrawRange(m_fillDrawRanges, *m_font, firstVertex, m_vertices.getVertexCount() - firstVertex);
+
+                    if (m_outlineThickness != 0)
+                    {
+                        const std::size_t firstOutlineVertex = m_outlineVertices.getVertexCount();
+                        addLineHorizontal(m_outlineVertices,
+                                          0.0f,
+                                          x,
+                                          y,
+                                          m_outlineColor,
+                                          underlineOffset,
+                                          underlineThickness,
+                                          m_outlineThickness);
+                        appendDrawRange(m_outlineDrawRanges,
+                                        *m_font,
+                                        firstOutlineVertex,
+                                        m_outlineVertices.getVertexCount() - firstOutlineVertex);
+                    }
+                }
+                else
+                {
+                    // If we have to apply underline to vertical text we will have to do it per glyph
+                    for (const auto& entry : verticalUnderlineData)
+                    {
+                        const std::size_t firstVertex = m_vertices.getVertexCount();
+                        addLineHorizontal(m_vertices,
+                                          entry.position.x,
+                                          entry.position.x + entry.width,
+                                          entry.position.y,
+                                          m_fillColor,
+                                          underlineOffset,
+                                          underlineThickness);
+                        appendDrawRange(m_fillDrawRanges, *m_font, firstVertex, m_vertices.getVertexCount() - firstVertex);
+
+                        if (m_outlineThickness != 0)
+                        {
+                            const std::size_t firstOutlineVertex = m_outlineVertices.getVertexCount();
+                            addLineHorizontal(m_outlineVertices,
+                                              entry.position.x,
+                                              entry.position.x + entry.width,
+                                              entry.position.y,
+                                              m_outlineColor,
+                                              underlineOffset,
+                                              underlineThickness,
+                                              m_outlineThickness);
+                            appendDrawRange(m_outlineDrawRanges,
+                                            *m_font,
+                                            firstOutlineVertex,
+                                            m_outlineVertices.getVertexCount() - firstOutlineVertex);
+                        }
+                    }
+                }
+            }
+
+            // If we're using the strikethrough style and there's a new line, draw a line across all characters
+            if (isStrikeThrough)
+            {
+                if (m_textOrientation == TextOrientation::Default)
+                {
+                    const std::size_t firstVertex = m_vertices.getVertexCount();
+                    addLineHorizontal(m_vertices, 0.0f, x, y, m_fillColor, strikeThroughOffset, underlineThickness);
+                    appendDrawRange(m_fillDrawRanges, *m_font, firstVertex, m_vertices.getVertexCount() - firstVertex);
+
+                    if (m_outlineThickness != 0)
+                    {
+                        const std::size_t firstOutlineVertex = m_outlineVertices.getVertexCount();
+                        addLineHorizontal(m_outlineVertices,
+                                          0.0f,
+                                          x,
+                                          y,
+                                          m_outlineColor,
+                                          strikeThroughOffset,
+                                          underlineThickness,
+                                          m_outlineThickness);
+                        appendDrawRange(m_outlineDrawRanges,
+                                        *m_font,
+                                        firstOutlineVertex,
+                                        m_outlineVertices.getVertexCount() - firstOutlineVertex);
+                    }
+                }
+                else
+                {
+                    // Slanting the text by 12 degrees means the strikethrough would
+                    // have to be offset by
+                    // width * sin(12 degrees) / 2
+                    // which is approximately
+                    // width * 0.1
+                    const std::size_t firstVertex = m_vertices.getVertexCount();
+                    addLineVertical(m_vertices,
+                                    lineMinY,
+                                    lineMaxY,
+                                    m_fillColor,
+                                    (m_style & Italic) ? (lineMaxX - lineMinX) * 0.1f : 0.0f,
+                                    underlineThickness);
+                    appendDrawRange(m_fillDrawRanges, *m_font, firstVertex, m_vertices.getVertexCount() - firstVertex);
+
+                    if (m_outlineThickness != 0)
+                    {
+                        const std::size_t firstOutlineVertex = m_outlineVertices.getVertexCount();
+                        addLineVertical(m_outlineVertices,
+                                        lineMinY,
+                                        lineMaxY,
+                                        m_outlineColor,
+                                        (m_style & Italic) ? (lineMaxX - lineMinX) * 0.1f : 0.0f,
+                                        underlineThickness,
+                                        m_outlineThickness);
+                        appendDrawRange(m_outlineDrawRanges,
+                                        *m_font,
+                                        firstOutlineVertex,
+                                        m_outlineVertices.getVertexCount() - firstOutlineVertex);
+                    }
+                }
+            }
+
+            registerFont(*m_font);
+            currentLine.clear();
+            currentLineIndices.clear();
+            currentLineTabIndices.clear();
+            return;
+        }
+
+        // Fallback path: split the line into font sub-runs, shape every run on
+        // its own and concatenate the results along the writing direction.
+        std::vector<SubRun> subRuns = splitIntoSubRuns();
 
         // Variables used to compute bounds for the current line
         auto lineMinX = static_cast<float>(m_characterSize);
@@ -855,170 +1450,223 @@ void Text::ensureGeometryUpdate() const
 
         std::vector<VerticalUnderlineEntry> verticalUnderlineData;
 
-        if (m_textOrientation != TextOrientation::Default)
-            verticalUnderlineData.reserve(shapeOutput.size());
-
-        // We want to combine the multiple spaces we substituted a tab with back into a single glyph
-        // To do that we just enlarge the first of its shaped spaces to 4 times its width
-        // We then skip the following 3 spaces
-        auto glyphsToSkip = 0;
-
-        // Create one quad for each character
-        for (const auto& shapeGlyph : shapeOutput)
+        // Shape every sub-run up front. HarfBuzz returns RTL glyphs already
+        // reordered into visual sequence while keeping advances positive, so an
+        // RTL line must emit its sub-runs in reverse logical order for the
+        // concatenation to stay visually correct.
+        struct ShapedRun
         {
-            // Skip trailing spaces of a tab
-            if (glyphsToSkip > 0)
-            {
-                --glyphsToSkip;
+            const SubRun*                  subRun{};
+            std::shared_ptr<ShaperImpl>    shaper;
+            std::vector<ShaperImpl::GlyphData> glyphs;
+        };
+
+        std::vector<ShapedRun> shapedRuns;
+        shapedRuns.reserve(subRuns.size());
+
+        for (SubRun& subRun : subRuns)
+        {
+            ShapedRun shapedRun;
+            shapedRun.subRun = &subRun;
+            shapedRun.shaper = getShaperForFont(*subRun.font);
+
+            if (!shapedRun.shaper)
                 continue;
-            }
 
-            // Extract the current glyph's description
-            const Glyph& glyph = m_font->getGlyphById(shapeGlyph.id, m_characterSize, isBold);
+            shapedRun.glyphs = shapedRun.shaper->shape(subRun.text,
+                                                       subRun.indices,
+                                                       currentScript,
+                                                       currentDirection,
+                                                       m_textOrientation,
+                                                       m_clusterGrouping,
+                                                       m_outlineThickness,
+                                                       m_style & Bold);
+            shapedRuns.push_back(std::move(shapedRun));
+        }
 
-            // Add the glyph to the glyph list
-            auto& glyphEntry    = m_glyphs.emplace_back(ShapedGlyph{glyph, {}, {}, {}});
-            glyphEntry.cluster  = shapeGlyph.cluster;
-            glyphEntry.position = sf::Vector2f{x, y} + shapeGlyph.offset;
-            auto isHorizontal   = false;
-            auto isVertical     = false;
+        const bool isRtl = (currentDirection == HB_DIRECTION_RTL);
 
-            switch (shapeGlyph.direction)
+        if (isRtl)
+            std::reverse(shapedRuns.begin(), shapedRuns.end());
+
+        for (const ShapedRun& shapedRun : shapedRuns)
+        {
+            const Font& runFont = *shapedRun.subRun->font;
+            registerFont(runFont);
+
+            // We want to combine the multiple spaces we substituted a tab with back into a single glyph
+            // To do that we just enlarge the first of its shaped spaces to 4 times its width
+            // We then skip the following 3 spaces
+            auto glyphsToSkip = 0;
+
+            for (const auto& shapeGlyph : shapedRun.glyphs)
             {
-                case HB_DIRECTION_LTR:
-                    glyphEntry.textDirection = TextDirection::LeftToRight;
-                    glyphEntry.glyph.advance = shapeGlyph.advance.x;
-                    glyphEntry.baseline      = y;
-                    isHorizontal             = true;
-                    break;
-                case HB_DIRECTION_RTL:
-                    glyphEntry.textDirection = TextDirection::RightToLeft;
-                    glyphEntry.glyph.advance = shapeGlyph.advance.x;
-                    glyphEntry.baseline      = y;
-                    isHorizontal             = true;
-                    break;
-                case HB_DIRECTION_TTB:
-                    glyphEntry.textDirection = TextDirection::TopToBottom;
-                    glyphEntry.glyph.advance = shapeGlyph.advance.y;
-                    glyphEntry.baseline      = x;
-                    isVertical               = true;
-                    break;
-                case HB_DIRECTION_BTT:
-                    glyphEntry.textDirection = TextDirection::BottomToTop;
-                    glyphEntry.glyph.advance = shapeGlyph.advance.y;
-                    glyphEntry.baseline      = x;
-                    isVertical               = true;
-                    break;
-                default:
-                    glyphEntry.textDirection = TextDirection::Unspecified;
-                    break;
-            }
-
-            std::uint32_t style            = m_style;
-            Color         fillColor        = m_fillColor;
-            Color         outlineColor     = m_outlineColor;
-            float         outlineThickness = m_outlineThickness;
-            float         italicShear      = 0.0f;
-
-            // Add the glyph to the vertices, if the texture rect has an area
-            // (not the case with transparent glyphs e.g. space character)
-            if (glyph.textureRect.size.x != 0 && glyph.textureRect.size.y != 0)
-            {
-                if (m_glyphPreProcessor)
-                    m_glyphPreProcessor(glyphEntry, style, fillColor, outlineColor, outlineThickness);
-
-                italicShear = (style & Italic) ? degrees(12).asRadians() : 0.0f;
-
-                // Apply the outline
-                if (outlineThickness != 0)
+                // Skip trailing spaces of a tab
+                if (glyphsToSkip > 0)
                 {
-                    const Glyph& outlineGlyph = m_font->getGlyphById(shapeGlyph.id, m_characterSize, style & Bold, outlineThickness);
-
-                    // Add the outline glyph to the vertices
-                    addGlyphQuad(m_outlineVertices, glyphEntry.position, outlineColor, outlineGlyph, italicShear);
+                    --glyphsToSkip;
+                    continue;
                 }
 
-                glyphEntry.vertexOffset = m_vertices.getVertexCount();
+                // Extract the current glyph's description from the font that owns this run
+                const Glyph& glyph = runFont.getGlyphById(shapeGlyph.id, m_characterSize, isBold);
 
-                const Glyph& fillGlyph = m_font->getGlyphById(shapeGlyph.id, m_characterSize, style & Bold);
-                addGlyphQuad(m_vertices, glyphEntry.position, fillColor, fillGlyph, italicShear);
+                // Add the glyph to the glyph list
+                auto& glyphEntry    = m_glyphs.emplace_back(ShapedGlyph{glyph, &runFont, {}, {}, {}});
+                glyphEntry.cluster  = shapeGlyph.cluster;
+                glyphEntry.position = sf::Vector2f{x, y} + shapeGlyph.offset;
+                auto isHorizontal   = false;
+                auto isVertical     = false;
 
-                glyphEntry.vertexCount = m_vertices.getVertexCount() - glyphEntry.vertexOffset;
-            }
-            else
-            {
-                // Remove unwanted x-offset when dealing with vertical spaces
-                if ((shapeGlyph.direction == HB_DIRECTION_TTB) || (shapeGlyph.direction == HB_DIRECTION_BTT))
-                    glyphEntry.position.x -= shapeGlyph.offset.x;
-
-                // Check if we are dealing with the start of a tab
-                if (std::find(currentLineTabIndices.begin(), currentLineTabIndices.end(), shapeGlyph.cluster) !=
-                    currentLineTabIndices.end())
+                switch (shapeGlyph.direction)
                 {
-                    // Widen the size to 4 times the advance of the space glyph
-                    glyphEntry.glyph.advance *= 4.0f;
+                    case HB_DIRECTION_LTR:
+                        glyphEntry.textDirection = TextDirection::LeftToRight;
+                        glyphEntry.glyph.advance = shapeGlyph.advance.x;
+                        glyphEntry.baseline      = y;
+                        isHorizontal             = true;
+                        break;
+                    case HB_DIRECTION_RTL:
+                        glyphEntry.textDirection = TextDirection::RightToLeft;
+                        glyphEntry.glyph.advance = shapeGlyph.advance.x;
+                        glyphEntry.baseline      = y;
+                        isHorizontal             = true;
+                        break;
+                    case HB_DIRECTION_TTB:
+                        glyphEntry.textDirection = TextDirection::TopToBottom;
+                        glyphEntry.glyph.advance = shapeGlyph.advance.y;
+                        glyphEntry.baseline      = x;
+                        isVertical               = true;
+                        break;
+                    case HB_DIRECTION_BTT:
+                        glyphEntry.textDirection = TextDirection::BottomToTop;
+                        glyphEntry.glyph.advance = shapeGlyph.advance.y;
+                        glyphEntry.baseline      = x;
+                        isVertical               = true;
+                        break;
+                    default:
+                        glyphEntry.textDirection = TextDirection::Unspecified;
+                        break;
+                }
 
-                    if (isHorizontal)
+                std::uint32_t style            = m_style;
+                Color         fillColor        = m_fillColor;
+                Color         outlineColor     = m_outlineColor;
+                float         outlineThickness = m_outlineThickness;
+                float         italicShear      = 0.0f;
+
+                // Add the glyph to the vertices, if the texture rect has an area
+                // (not the case with transparent glyphs e.g. space character)
+                if (glyph.textureRect.size.x != 0 && glyph.textureRect.size.y != 0)
+                {
+                    if (m_glyphPreProcessor)
+                        m_glyphPreProcessor(glyphEntry, style, fillColor, outlineColor, outlineThickness);
+
+                    italicShear = (style & Italic) ? degrees(12).asRadians() : 0.0f;
+
+                    // Apply the outline
+                    if (outlineThickness != 0)
                     {
-                        glyphEntry.glyph.bounds.size.x = glyphEntry.glyph.advance;
-                    }
-                    else if (isVertical)
-                    {
-                        glyphEntry.glyph.bounds.size.y = glyphEntry.glyph.advance;
+                        const Glyph& outlineGlyph = runFont.getGlyphById(shapeGlyph.id,
+                                                                          m_characterSize,
+                                                                          style & Bold,
+                                                                          outlineThickness);
+
+                        const std::size_t firstVertex = m_outlineVertices.getVertexCount();
+                        addGlyphQuad(m_outlineVertices, glyphEntry.position, outlineColor, outlineGlyph, italicShear);
+                        appendDrawRange(m_outlineDrawRanges,
+                                        runFont,
+                                        firstVertex,
+                                        m_outlineVertices.getVertexCount() - firstVertex);
                     }
 
-                    // Skip the next 3 space glyphs
-                    glyphsToSkip = 3;
+                    glyphEntry.vertexOffset = m_vertices.getVertexCount();
+
+                    const Glyph& fillGlyph = runFont.getGlyphById(shapeGlyph.id, m_characterSize, style & Bold);
+                    const std::size_t firstVertex = m_vertices.getVertexCount();
+                    addGlyphQuad(m_vertices, glyphEntry.position, fillColor, fillGlyph, italicShear);
+                    glyphEntry.vertexCount = m_vertices.getVertexCount() - glyphEntry.vertexOffset;
+                    appendDrawRange(m_fillDrawRanges,
+                                    runFont,
+                                    firstVertex,
+                                    m_vertices.getVertexCount() - firstVertex);
                 }
                 else
                 {
-                    // If the glyph doesn't have a texture it is probably a space
-                    // Set the bounds width to the width of the space so the user can
-                    // make use of it
-                    if (isHorizontal)
+                    // Remove unwanted x-offset when dealing with vertical spaces
+                    if ((shapeGlyph.direction == HB_DIRECTION_TTB) || (shapeGlyph.direction == HB_DIRECTION_BTT))
+                        glyphEntry.position.x -= shapeGlyph.offset.x;
+
+                    // Check if we are dealing with the start of a tab
+                    if (std::find(shapedRun.subRun->tabIndices.begin(),
+                                  shapedRun.subRun->tabIndices.end(),
+                                  shapeGlyph.cluster) != shapedRun.subRun->tabIndices.end())
                     {
-                        glyphEntry.glyph.bounds.size = {shapeGlyph.advance.x + letterSpacing, 0.0f};
+                        // Widen the size to 4 times the advance of the space glyph
+                        glyphEntry.glyph.advance *= 4.0f;
+
+                        if (isHorizontal)
+                        {
+                            glyphEntry.glyph.bounds.size.x = glyphEntry.glyph.advance;
+                        }
+                        else if (isVertical)
+                        {
+                            glyphEntry.glyph.bounds.size.y = glyphEntry.glyph.advance;
+                        }
+
+                        // Skip the next 3 space glyphs
+                        glyphsToSkip = 3;
                     }
-                    else if (isVertical)
+                    else
                     {
-                        glyphEntry.glyph.bounds.size = {0.0f, shapeGlyph.advance.y + letterSpacing};
+                        // If the glyph doesn't have a texture it is probably a space
+                        // Set the bounds width to the width of the space so the user can
+                        // make use of it
+                        if (isHorizontal)
+                        {
+                            glyphEntry.glyph.bounds.size = {shapeGlyph.advance.x + letterSpacing, 0.0f};
+                        }
+                        else if (isVertical)
+                        {
+                            glyphEntry.glyph.bounds.size = {0.0f, shapeGlyph.advance.y + letterSpacing};
+                        }
                     }
+
+                    if (m_glyphPreProcessor)
+                        m_glyphPreProcessor(glyphEntry, style, fillColor, outlineColor, outlineThickness);
+
+                    italicShear = (style & Italic) ? degrees(12).asRadians() : 0.0f;
                 }
 
-                if (m_glyphPreProcessor)
-                    m_glyphPreProcessor(glyphEntry, style, fillColor, outlineColor, outlineThickness);
+                // Update the current bounds
+                const Vector2f p1 = glyph.bounds.position + shapeGlyph.offset;
+                const Vector2f p2 = p1 + glyphEntry.glyph.bounds.size;
 
-                italicShear = (style & Italic) ? degrees(12).asRadians() : 0.0f;
-            }
+                lineMinX = std::min(lineMinX, x + p1.x - italicShear * p2.y);
+                lineMaxX = std::max(lineMaxX, x + p2.x - italicShear * p1.y);
+                lineMinY = std::min(lineMinY, y + p1.y);
+                lineMaxY = std::max(lineMaxY, y + p2.y);
 
-            // Update the current bounds
-            const Vector2f p1 = glyph.bounds.position + shapeGlyph.offset;
-            const Vector2f p2 = p1 + glyphEntry.glyph.bounds.size;
+                // Advance to the next character
+                // Only apply additional letter spacing if the current glyph has an advance (base glyph)
+                // Applying the letter spacing to glyphs without an advance would affect
+                // mark glyphs as well which would lead to incorrect results
+                const auto hasAdvance = glyphEntry.glyph.advance > 0.0f;
 
-            lineMinX = std::min(lineMinX, x + p1.x - italicShear * p2.y);
-            lineMaxX = std::max(lineMaxX, x + p2.x - italicShear * p1.y);
-            lineMinY = std::min(lineMinY, y + p1.y);
-            lineMaxY = std::max(lineMaxY, y + p2.y);
+                if (isHorizontal)
+                {
+                    x += glyphEntry.glyph.advance + (hasAdvance ? letterSpacing : 0.0f);
+                }
+                else if (isVertical)
+                {
+                    // We only add data to the vertical underline list for base glyphs
+                    if (isUnderlined && hasAdvance)
+                        verticalUnderlineData.emplace_back(
+                            VerticalUnderlineEntry{glyphEntry.position + sf::Vector2f(glyphEntry.glyph.bounds.position.x, 0.0f),
+                                                   glyphEntry.glyph.bounds.size.x});
 
-            // Advance to the next character
-            // Only apply additional letter spacing if the current glyph has an advance (base glyph)
-            // Applying the letter spacing to glyphs without an advance would affect
-            // mark glyphs as well which would lead to incorrect results
-            const auto hasAdvance = glyphEntry.glyph.advance > 0.0f;
-
-            if (isHorizontal)
-            {
-                x += glyphEntry.glyph.advance + (hasAdvance ? letterSpacing : 0.0f);
-            }
-            else if (isVertical)
-            {
-                // We only add data to the vertical underline list for base glyphs
-                if (isUnderlined && hasAdvance)
-                    verticalUnderlineData.emplace_back(
-                        VerticalUnderlineEntry{glyphEntry.position + sf::Vector2f(glyphEntry.glyph.bounds.position.x, 0.0f),
-                                               glyphEntry.glyph.bounds.size.x});
-
-                y += glyphEntry.glyph.advance + (hasAdvance ? letterSpacing : 0.0f);
+                    y += glyphEntry.glyph.advance + (hasAdvance ? letterSpacing : 0.0f);
+                }
             }
         }
 
@@ -1037,16 +1685,33 @@ void Text::ensureGeometryUpdate() const
         {
             if (m_textOrientation == TextOrientation::Default)
             {
+                const std::size_t firstVertex = m_vertices.getVertexCount();
                 addLineHorizontal(m_vertices, 0.0f, x, y, m_fillColor, underlineOffset, underlineThickness);
+                appendDrawRange(m_fillDrawRanges, *m_font, firstVertex, m_vertices.getVertexCount() - firstVertex);
 
                 if (m_outlineThickness != 0)
-                    addLineHorizontal(m_outlineVertices, 0.0f, x, y, m_outlineColor, underlineOffset, underlineThickness, m_outlineThickness);
+                {
+                    const std::size_t firstOutlineVertex = m_outlineVertices.getVertexCount();
+                    addLineHorizontal(m_outlineVertices,
+                                      0.0f,
+                                      x,
+                                      y,
+                                      m_outlineColor,
+                                      underlineOffset,
+                                      underlineThickness,
+                                      m_outlineThickness);
+                    appendDrawRange(m_outlineDrawRanges,
+                                    *m_font,
+                                    firstOutlineVertex,
+                                    m_outlineVertices.getVertexCount() - firstOutlineVertex);
+                }
             }
             else
             {
                 // If we have to apply underline to vertical text we will have to do it per glyph
                 for (const auto& entry : verticalUnderlineData)
                 {
+                    const std::size_t firstVertex = m_vertices.getVertexCount();
                     addLineHorizontal(m_vertices,
                                       entry.position.x,
                                       entry.position.x + entry.width,
@@ -1054,8 +1719,11 @@ void Text::ensureGeometryUpdate() const
                                       m_fillColor,
                                       underlineOffset,
                                       underlineThickness);
+                    appendDrawRange(m_fillDrawRanges, *m_font, firstVertex, m_vertices.getVertexCount() - firstVertex);
 
                     if (m_outlineThickness != 0)
+                    {
+                        const std::size_t firstOutlineVertex = m_outlineVertices.getVertexCount();
                         addLineHorizontal(m_outlineVertices,
                                           entry.position.x,
                                           entry.position.x + entry.width,
@@ -1064,6 +1732,11 @@ void Text::ensureGeometryUpdate() const
                                           underlineOffset,
                                           underlineThickness,
                                           m_outlineThickness);
+                        appendDrawRange(m_outlineDrawRanges,
+                                        *m_font,
+                                        firstOutlineVertex,
+                                        m_outlineVertices.getVertexCount() - firstOutlineVertex);
+                    }
                 }
             }
         }
@@ -1073,10 +1746,26 @@ void Text::ensureGeometryUpdate() const
         {
             if (m_textOrientation == TextOrientation::Default)
             {
+                const std::size_t firstVertex = m_vertices.getVertexCount();
                 addLineHorizontal(m_vertices, 0.0f, x, y, m_fillColor, strikeThroughOffset, underlineThickness);
+                appendDrawRange(m_fillDrawRanges, *m_font, firstVertex, m_vertices.getVertexCount() - firstVertex);
 
                 if (m_outlineThickness != 0)
-                    addLineHorizontal(m_outlineVertices, 0.0f, x, y, m_outlineColor, strikeThroughOffset, underlineThickness, m_outlineThickness);
+                {
+                    const std::size_t firstOutlineVertex = m_outlineVertices.getVertexCount();
+                    addLineHorizontal(m_outlineVertices,
+                                      0.0f,
+                                      x,
+                                      y,
+                                      m_outlineColor,
+                                      strikeThroughOffset,
+                                      underlineThickness,
+                                      m_outlineThickness);
+                    appendDrawRange(m_outlineDrawRanges,
+                                    *m_font,
+                                    firstOutlineVertex,
+                                    m_outlineVertices.getVertexCount() - firstOutlineVertex);
+                }
             }
             else
             {
@@ -1085,14 +1774,18 @@ void Text::ensureGeometryUpdate() const
                 // width * sin(12 degrees) / 2
                 // which is approximately
                 // width * 0.1
+                const std::size_t firstVertex = m_vertices.getVertexCount();
                 addLineVertical(m_vertices,
                                 lineMinY,
                                 lineMaxY,
                                 m_fillColor,
                                 (m_style & Italic) ? (lineMaxX - lineMinX) * 0.1f : 0.0f,
                                 underlineThickness);
+                appendDrawRange(m_fillDrawRanges, *m_font, firstVertex, m_vertices.getVertexCount() - firstVertex);
 
                 if (m_outlineThickness != 0)
+                {
+                    const std::size_t firstOutlineVertex = m_outlineVertices.getVertexCount();
                     addLineVertical(m_outlineVertices,
                                     lineMinY,
                                     lineMaxY,
@@ -1100,6 +1793,11 @@ void Text::ensureGeometryUpdate() const
                                     (m_style & Italic) ? (lineMaxX - lineMinX) * 0.1f : 0.0f,
                                     underlineThickness,
                                     m_outlineThickness);
+                    appendDrawRange(m_outlineDrawRanges,
+                                    *m_font,
+                                    firstOutlineVertex,
+                                    m_outlineVertices.getVertexCount() - firstOutlineVertex);
+                }
             }
         }
     };
@@ -1178,7 +1876,7 @@ void Text::ensureGeometryUpdate() const
                 // For our purposes, we consider the newline
                 // character to constitute its own cluster
                 auto& glyph = m_glyphs.emplace_back(
-                    ShapedGlyph{m_font->getGlyph('\n', m_characterSize, isBold), {}, {}, {}});
+                    ShapedGlyph{m_font->getGlyph('\n', m_characterSize, isBold), m_font, {}, {}, {}});
                 glyph.glyph.bounds.size = {0.0f, 0.0f};
                 glyph.baseline          = y;
 
@@ -1331,6 +2029,14 @@ void Text::ensureGeometryUpdate() const
             m_bounds.position.x -= m_bounds.size.x;
         }
     }
+
+    // Snapshot the glyph texture cache id of every font that the generated
+    // geometry samples. The next ensureGeometryUpdate() call can then detect
+    // texture changes without rebuilding anything merely because fallback
+    // fonts are configured.
+    m_fontTextureIds.reserve(fontsInUse.size());
+    for (const Font* font : fontsInUse)
+        m_fontTextureIds.emplace_back(font, font->getTexture(m_characterSize).m_cacheId);
 }
 
 } // namespace sf

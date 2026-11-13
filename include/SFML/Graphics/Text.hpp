@@ -43,6 +43,8 @@
 
 #include <functional>
 #include <memory>
+#include <unordered_map>
+#include <vector>
 
 #include <cstddef>
 #include <cstdint>
@@ -128,6 +130,7 @@ public:
     {
         Glyph glyph;
 
+        const Font*   font{};          //!< Font that provides the glyph (primary or a fallback font), never null for shaped glyphs
         Vector2f      position;        //!< Position of the glyph within a text
         std::uint32_t cluster{};       //!< Cluster ID
         TextDirection textDirection{}; //!< Text direction
@@ -380,10 +383,91 @@ public:
     ///
     /// \return Reference to the text's font
     ///
-    /// \see `setFont`
+    /// \see `setFont`, `addFallbackFont`, `getFallbackFonts`
     ///
     ////////////////////////////////////////////////////////////
     [[nodiscard]] const Font& getFont() const;
+
+    ////////////////////////////////////////////////////////////
+    /// \brief Add a fallback font
+    ///
+    /// When the primary font (set with `setFont`) does not
+    /// contain a glyph for a code point, the fallback fonts are
+    /// queried in the order in which they were added. The first
+    /// fallback font that provides a glyph for the code point is
+    /// used to shape and rasterize it.
+    ///
+    /// Font resolution is performed per grapheme cluster so that
+    /// combining marks and other multiple-code-point clusters are
+    /// never split across fonts: the first code point of the
+    /// cluster determines the font that is used to shape the
+    /// whole cluster. If none of the configured fonts provides a
+    /// glyph for that code point, the primary font is used and
+    /// renders its own missing-glyph representation, so the
+    /// output always degrades deterministically.
+    ///
+    /// Each sub-run that uses a single font is shaped
+    /// independently with HarfBuzz, preserving kerning, ligatures,
+    /// right-to-left ordering and combining behavior inside each
+    /// run. Line height, baseline, underline and strikethrough
+    /// metrics always come from the primary font, and every font
+    /// is rasterized at the same character size, so mixed-font
+    /// text shares a common baseline.
+    ///
+    /// The fallback list is flat: fonts added through this
+    /// function do not recursively consult their own fallback
+    /// configuration. Adding the primary font itself, a font that
+    /// is already in the list, or an empty (not yet opened) font
+    /// has no effect.
+    ///
+    /// As with the primary font, the fallback font is not copied
+    /// and must remain alive for as long as the text uses it.
+    ///
+    /// \param font Fallback font to add, consulted after previously added fallback fonts
+    ///
+    /// \see `removeFallbackFont`, `clearFallbackFonts`, `getFallbackFonts`
+    ///
+    ////////////////////////////////////////////////////////////
+    void addFallbackFont(const Font& font);
+
+    ////////////////////////////////////////////////////////////
+    /// \brief Remove a fallback font
+    ///
+    /// If `font` is not part of the fallback list, this function
+    /// does nothing. The primary font set with `setFont` is not
+    /// affected.
+    ///
+    /// \param font Fallback font to remove
+    ///
+    /// \see `addFallbackFont`, `clearFallbackFonts`, `getFallbackFonts`
+    ///
+    ////////////////////////////////////////////////////////////
+    void removeFallbackFont(const Font& font);
+
+    ////////////////////////////////////////////////////////////
+    /// \brief Remove all fallback fonts
+    ///
+    /// After calling this function the text behaves exactly like
+    /// a text without any fallback configuration again.
+    ///
+    /// \see `addFallbackFont`, `removeFallbackFont`, `getFallbackFonts`
+    ///
+    ////////////////////////////////////////////////////////////
+    void clearFallbackFonts();
+
+    ////////////////////////////////////////////////////////////
+    /// \brief Get the fallback fonts
+    ///
+    /// The fonts are returned in the order in which they are
+    /// consulted when the primary font lacks a glyph. The primary
+    /// font set with `setFont` is not included.
+    ///
+    /// \return The configured fallback fonts, in consultation order
+    ///
+    /// \see `addFallbackFont`, `removeFallbackFont`, `clearFallbackFonts`
+    ///
+    ////////////////////////////////////////////////////////////
+    [[nodiscard]] const std::vector<const Font*>& getFallbackFonts() const;
 
     ////////////////////////////////////////////////////////////
     /// \brief Get the character size
@@ -795,6 +879,7 @@ private:
     ////////////////////////////////////////////////////////////
     String                m_string;                                      //!< String to display
     const Font*           m_font{};                                      //!< Font used to display the string
+    std::vector<const Font*> m_fallbackFonts;                            //!< Fallback fonts consulted in order when the primary font lacks a glyph
     unsigned int          m_characterSize{30};                           //!< Base size of characters, in pixels
     float                 m_letterSpacingFactor{1.f};                    //!< Spacing factor between letters
     float                 m_lineSpacingFactor{1.f};                      //!< Spacing factor between lines
@@ -810,9 +895,33 @@ private:
     mutable VertexArray   m_outlineVertices{PrimitiveType::Triangles}; //!< Vertex array containing the outline geometry
     mutable FloatRect     m_bounds;               //!< Bounding rectangle of the text (in local coordinates)
     mutable bool          m_geometryNeedUpdate{}; //!< Does the geometry need to be recomputed?
-    mutable std::uint64_t m_fontTextureId{};      //!< The font texture id
+    mutable std::vector<std::pair<const Font*, std::uint64_t>> m_fontTextureIds; //!< Snapshot of the glyph texture cache ids of every font used by the current geometry
+    mutable std::unordered_map<char32_t, const Font*>          m_coverageCache;  //!< Maps a code point to the first font covering it, keyed by code point (only valid while the font configuration is unchanged)
+    mutable std::vector<std::pair<const Font*, std::pair<std::size_t, std::size_t>>> m_fillDrawRanges;    //!< Contiguous fill vertex ranges and the font whose glyph texture they sample
+    mutable std::vector<std::pair<const Font*, std::pair<std::size_t, std::size_t>>> m_outlineDrawRanges; //!< Contiguous outline vertex ranges and the font whose glyph texture they sample
     mutable std::vector<ShapedGlyph>    m_glyphs; //!< Cluster positions
     mutable std::shared_ptr<ShaperImpl> m_shaper; //!< The shaper implementation
+
+    ////////////////////////////////////////////////////////////
+    /// \brief Resolve the font that provides a glyph for a code point
+    ///
+    /// The primary font is consulted first, followed by the
+    /// fallback fonts in order. Results are cached per code point
+    /// so that repeated geometry updates do not repeatedly query
+    /// the fonts' character maps.
+    ///
+    /// \param codePoint Unicode code point to resolve
+    ///
+    /// \return The first font that covers the code point, or the primary font if none of them does
+    ///
+    ////////////////////////////////////////////////////////////
+    const Font& resolveFallbackFont(char32_t codePoint) const;
+
+    ////////////////////////////////////////////////////////////
+    /// \brief Invalidate caches that depend on the font configuration
+    ///
+    ////////////////////////////////////////////////////////////
+    void invalidateFontConfiguration();
 };
 
 } // namespace sf
@@ -857,6 +966,14 @@ private:
 /// characters such as spaces, digits and punctuation take the
 /// script of the surrounding text, and a closing bracket takes
 /// the script of its matching opening bracket.
+///
+/// When the primary font does not contain a glyph for a code
+/// point, optional fallback fonts (see `addFallbackFont`) are
+/// consulted in order and the first one covering the code point
+/// is used. The decision is taken per grapheme cluster so that
+/// combining marks stay with their base, every font sub-run is
+/// shaped independently by HarfBuzz, and the line metrics always
+/// remain those of the primary font.
 ///
 /// See also the note on coordinates and undistorted rendering in `sf::Transformable`.
 ///

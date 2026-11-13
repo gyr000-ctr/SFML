@@ -22,6 +22,7 @@ set(GRAPHICS_SRC
     Sprite.test.cpp
     StencilMode.test.cpp
     Text.test.cpp
+    TextFallback.test.cpp
     Texture.test.cpp
     Transform.test.cpp
     Transformable.test.cpp
@@ -53,6 +54,12 @@ if (XCODE AND SFML_OS_IOS)
         shader.frag
         shader.geom
         shader.vert
+        tuffy-fallback-combining.ttf
+        tuffy-fallback-cyrillic.ttf
+        tuffy-fallback-emoji.ttf
+        tuffy-fallback-greek.ttf
+        tuffy-fallback-hebrew.ttf
+        tuffy-fallback-uncovered.ttf
         tuffy-🐌.ttf
         tuffy-ń.ttf
         tuffy.ttf

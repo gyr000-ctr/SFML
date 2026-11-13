@@ -1,5 +1,13 @@
 # Changelog
 
+## SFML 3.2.0
+
+### Graphics
+
+**Features**
+
+-   Add configurable font fallback to `sf::Text`: additional fonts can be mounted with `addFallbackFont` and are consulted in order when the primary font lacks a glyph. Font selection is performed per grapheme cluster so combining marks stay with their base, each sub-run keeps full HarfBuzz shaping (kerning, ligatures, RTL), and line metrics remain those of the primary font. Text without fallback fonts is rendered byte-for-byte identically to previous releases.
+
 ## SFML 3.1.0
 
 ### General
