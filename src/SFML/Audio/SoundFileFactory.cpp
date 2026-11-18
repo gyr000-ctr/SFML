@@ -26,6 +26,7 @@
 // Headers
 ////////////////////////////////////////////////////////////
 #include <SFML/Audio/SoundFileFactory.hpp>
+#include <SFML/Audio/SoundFileReaderAiff.hpp>
 #include <SFML/Audio/SoundFileReaderFlac.hpp>
 #include <SFML/Audio/SoundFileReaderMp3.hpp>
 #include <SFML/Audio/SoundFileReaderOgg.hpp>
@@ -140,10 +141,15 @@ std::unique_ptr<SoundFileWriter> SoundFileFactory::createWriterFromFilename(cons
 ////////////////////////////////////////////////////////////
 SoundFileFactory::ReaderFactoryMap& SoundFileFactory::getReaderFactoryMap()
 {
-    // The map is pre-populated with default readers on construction
+    // The map is pre-populated with default readers on construction.
+    // Readers are probed in registration order. The AIFF reader is placed before the wav reader
+    // because the wav backend also accepts the AIFF container; probing the dedicated AIFF reader
+    // first ensures AIFF/AIFC files are decoded by it and that malformed AIFF files are rejected
+    // by its stricter validation before the more lenient wav reader gets a chance to claim them.
     static ReaderFactoryMap result{{&priv::createReader<priv::SoundFileReaderFlac>, &priv::SoundFileReaderFlac::check},
                                    {&priv::createReader<priv::SoundFileReaderMp3>, &priv::SoundFileReaderMp3::check},
                                    {&priv::createReader<priv::SoundFileReaderOgg>, &priv::SoundFileReaderOgg::check},
+                                   {&priv::createReader<priv::SoundFileReaderAiff>, &priv::SoundFileReaderAiff::check},
                                    {&priv::createReader<priv::SoundFileReaderWav>, &priv::SoundFileReaderWav::check}};
 
     return result;

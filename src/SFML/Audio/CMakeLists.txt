@@ -42,6 +42,8 @@ set(CODECS_SRC
     ${INCROOT}/SoundFileFactory.hpp
     ${INCROOT}/SoundFileFactory.inl
     ${INCROOT}/SoundFileReader.hpp
+    ${SRCROOT}/SoundFileReaderAiff.hpp
+    ${SRCROOT}/SoundFileReaderAiff.cpp
     ${SRCROOT}/SoundFileReaderFlac.hpp
     ${SRCROOT}/SoundFileReaderFlac.cpp
     ${SRCROOT}/SoundFileReaderMp3.hpp

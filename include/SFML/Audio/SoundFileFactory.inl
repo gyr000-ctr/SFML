@@ -27,6 +27,7 @@
 ////////////////////////////////////////////////////////////
 #include <SFML/Audio/SoundFileFactory.hpp> // NOLINT(misc-header-include-cycle)
 
+#include <algorithm>
 #include <memory>
 
 namespace sf
@@ -50,7 +51,16 @@ std::unique_ptr<SoundFileWriter> createWriter()
 template <typename T>
 void SoundFileFactory::registerReader()
 {
-    getReaderFactoryMap()[&priv::createReader<T>] = &T::check;
+    auto& readers = getReaderFactoryMap();
+
+    const auto it = std::find_if(readers.begin(),
+                                 readers.end(),
+                                 [](const auto& entry) { return entry.first == &priv::createReader<T>; });
+
+    if (it != readers.end())
+        it->second = &T::check;
+    else
+        readers.emplace_back(&priv::createReader<T>, &T::check);
 }
 
 
@@ -58,7 +68,14 @@ void SoundFileFactory::registerReader()
 template <typename T>
 void SoundFileFactory::unregisterReader()
 {
-    getReaderFactoryMap().erase(&priv::createReader<T>);
+    auto& readers = getReaderFactoryMap();
+
+    const auto it = std::find_if(readers.begin(),
+                                 readers.end(),
+                                 [](const auto& entry) { return entry.first == &priv::createReader<T>; });
+
+    if (it != readers.end())
+        readers.erase(it);
 }
 
 
@@ -66,7 +83,10 @@ void SoundFileFactory::unregisterReader()
 template <typename T>
 bool SoundFileFactory::isReaderRegistered()
 {
-    return getReaderFactoryMap().count(&priv::createReader<T>) == 1;
+    const auto& readers = getReaderFactoryMap();
+
+    return std::any_of(readers.begin(), readers.end(), [](const auto& entry)
+                       { return entry.first == &priv::createReader<T>; });
 }
 
 
@@ -74,7 +94,16 @@ bool SoundFileFactory::isReaderRegistered()
 template <typename T>
 void SoundFileFactory::registerWriter()
 {
-    getWriterFactoryMap()[&priv::createWriter<T>] = &T::check;
+    auto& writers = getWriterFactoryMap();
+
+    const auto it = std::find_if(writers.begin(),
+                                 writers.end(),
+                                 [](const auto& entry) { return entry.first == &priv::createWriter<T>; });
+
+    if (it != writers.end())
+        it->second = &T::check;
+    else
+        writers.emplace_back(&priv::createWriter<T>, &T::check);
 }
 
 
@@ -82,7 +111,14 @@ void SoundFileFactory::registerWriter()
 template <typename T>
 void SoundFileFactory::unregisterWriter()
 {
-    getWriterFactoryMap().erase(&priv::createWriter<T>);
+    auto& writers = getWriterFactoryMap();
+
+    const auto it = std::find_if(writers.begin(),
+                                 writers.end(),
+                                 [](const auto& entry) { return entry.first == &priv::createWriter<T>; });
+
+    if (it != writers.end())
+        writers.erase(it);
 }
 
 
@@ -90,7 +126,10 @@ void SoundFileFactory::unregisterWriter()
 template <typename T>
 bool SoundFileFactory::isWriterRegistered()
 {
-    return getWriterFactoryMap().count(&priv::createWriter<T>) == 1;
+    const auto& writers = getWriterFactoryMap();
+
+    return std::any_of(writers.begin(), writers.end(), [](const auto& entry)
+                       { return entry.first == &priv::createWriter<T>; });
 }
 
 } // namespace sf

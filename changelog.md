@@ -103,6 +103,7 @@
 -   Improve audio device and stream rerouting management (#3490, #3523)
 -   Add `sf::PlaybackDevice::getDeviceSampleRate` (#3525)
 -   [Linux] Update miniaudio to version 0.11.24 (#3640, #3641)
+-   Add support for reading AIFF/AIFC sound files
 
 **Bugfixes**
 

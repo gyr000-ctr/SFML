@@ -104,6 +104,8 @@ TEST_CASE("[Audio] sf::SoundFileFactory")
             CHECK(sf::SoundFileFactory::createReaderFromFilename("ding.mp3"));
             CHECK(sf::SoundFileFactory::createReaderFromFilename("doodle_pop.ogg"));
             CHECK(sf::SoundFileFactory::createReaderFromFilename("killdeer.wav"));
+            CHECK(sf::SoundFileFactory::createReaderFromFilename("test-aiff16.aiff"));
+            CHECK(sf::SoundFileFactory::createReaderFromFilename("test-aifc-sowt.aifc"));
         }
     }
 
@@ -129,6 +131,11 @@ TEST_CASE("[Audio] sf::SoundFileFactory")
         SECTION("wav")
         {
             REQUIRE(stream.open("killdeer.wav"));
+        }
+
+        SECTION("aiff")
+        {
+            REQUIRE(stream.open("test-aiff16.aiff"));
         }
 
         CHECK(sf::SoundFileFactory::createReaderFromStream(stream));

@@ -9,6 +9,7 @@
 #include <catch2/generators/catch_generators.hpp>
 
 #include <SystemUtil.hpp>
+#include <algorithm>
 #include <array>
 #include <type_traits>
 
@@ -85,6 +86,28 @@ TEST_CASE("[Audio] sf::InputSoundFile")
                 CHECK(inputSoundFile.getTimeOffset() == sf::Time::Zero);
                 CHECK(inputSoundFile.getSampleOffset() == 0);
             }
+
+            SECTION("aiff")
+            {
+                const sf::InputSoundFile inputSoundFile("test-aiff16.aiff");
+                CHECK(inputSoundFile.getSampleCount() == 1'000);
+                CHECK(inputSoundFile.getChannelCount() == 1);
+                CHECK(inputSoundFile.getSampleRate() == 44'100);
+                CHECK(inputSoundFile.getDuration() == sf::microseconds(22'675));
+                CHECK(inputSoundFile.getTimeOffset() == sf::Time::Zero);
+                CHECK(inputSoundFile.getSampleOffset() == 0);
+            }
+
+            SECTION("aifc")
+            {
+                const sf::InputSoundFile inputSoundFile("test-aifc-sowt.aifc");
+                CHECK(inputSoundFile.getSampleCount() == 1'000);
+                CHECK(inputSoundFile.getChannelCount() == 1);
+                CHECK(inputSoundFile.getSampleRate() == 44'100);
+                CHECK(inputSoundFile.getDuration() == sf::microseconds(22'675));
+                CHECK(inputSoundFile.getTimeOffset() == sf::Time::Zero);
+                CHECK(inputSoundFile.getSampleOffset() == 0);
+            }
         }
 
         SECTION("Memory")
@@ -145,6 +168,18 @@ TEST_CASE("[Audio] sf::InputSoundFile")
                 CHECK(inputSoundFile.getChannelCount() == 1);
                 CHECK(inputSoundFile.getSampleRate() == 22'050);
                 CHECK(inputSoundFile.getDuration() == sf::microseconds(5'122'040));
+                CHECK(inputSoundFile.getTimeOffset() == sf::Time::Zero);
+                CHECK(inputSoundFile.getSampleOffset() == 0);
+            }
+
+            SECTION("aiff")
+            {
+                sf::FileInputStream      stream("test-aiff16.aiff");
+                const sf::InputSoundFile inputSoundFile(stream);
+                CHECK(inputSoundFile.getSampleCount() == 1'000);
+                CHECK(inputSoundFile.getChannelCount() == 1);
+                CHECK(inputSoundFile.getSampleRate() == 44'100);
+                CHECK(inputSoundFile.getDuration() == sf::microseconds(22'675));
                 CHECK(inputSoundFile.getTimeOffset() == sf::Time::Zero);
                 CHECK(inputSoundFile.getSampleOffset() == 0);
             }
@@ -219,6 +254,17 @@ TEST_CASE("[Audio] sf::InputSoundFile")
                 CHECK(inputSoundFile.getTimeOffset() == sf::Time::Zero);
                 CHECK(inputSoundFile.getSampleOffset() == 0);
             }
+
+            SECTION("aiff")
+            {
+                REQUIRE(inputSoundFile.openFromFile("test-aiff16.aiff"));
+                CHECK(inputSoundFile.getSampleCount() == 1'000);
+                CHECK(inputSoundFile.getChannelCount() == 1);
+                CHECK(inputSoundFile.getSampleRate() == 44'100);
+                CHECK(inputSoundFile.getDuration() == sf::microseconds(22'675));
+                CHECK(inputSoundFile.getTimeOffset() == sf::Time::Zero);
+                CHECK(inputSoundFile.getSampleOffset() == 0);
+            }
         }
     }
 
@@ -233,6 +279,62 @@ TEST_CASE("[Audio] sf::InputSoundFile")
         CHECK(inputSoundFile.getDuration() == sf::microseconds(5'122'040));
         CHECK(inputSoundFile.getTimeOffset() == sf::Time::Zero);
         CHECK(inputSoundFile.getSampleOffset() == 0);
+    }
+
+    SECTION("openFromMemory() AIFF")
+    {
+        sf::InputSoundFile inputSoundFile;
+
+        SECTION("Valid AIFF")
+        {
+            const auto memory = loadIntoMemory("test-aiff16.aiff");
+            REQUIRE(inputSoundFile.openFromMemory(memory.data(), memory.size()));
+            CHECK(inputSoundFile.getSampleCount() == 1'000);
+            CHECK(inputSoundFile.getChannelCount() == 1);
+            CHECK(inputSoundFile.getSampleRate() == 44'100);
+            CHECK(inputSoundFile.getDuration() == sf::microseconds(22'675));
+        }
+
+        SECTION("Valid AIFC (sowt)")
+        {
+            const auto memory = loadIntoMemory("test-aifc-sowt.aifc");
+            REQUIRE(inputSoundFile.openFromMemory(memory.data(), memory.size()));
+            CHECK(inputSoundFile.getSampleCount() == 1'000);
+            CHECK(inputSoundFile.getChannelCount() == 1);
+            CHECK(inputSoundFile.getSampleRate() == 44'100);
+            CHECK(inputSoundFile.getDuration() == sf::microseconds(22'675));
+        }
+
+        SECTION("Bad chunk")
+        {
+            // Corrupt the COMM chunk size so that the chunk structure no longer adds up
+            auto memory = loadIntoMemory("test-aiff16.aiff");
+            memory[16] = std::byte{0};
+            memory[17] = std::byte{0};
+            memory[18] = std::byte{0};
+            memory[19] = std::byte{3};
+            CHECK(!inputSoundFile.openFromMemory(memory.data(), memory.size()));
+        }
+
+        SECTION("Truncated file")
+        {
+            // Cut the stream off in the middle of the COMM chunk
+            auto memory = loadIntoMemory("test-aiff16.aiff");
+            memory.resize(30);
+            CHECK(!inputSoundFile.openFromMemory(memory.data(), memory.size()));
+        }
+
+        SECTION("Unknown compression type")
+        {
+            // Replace the AIFC "NONE" compression type with an unsupported one
+            auto       memory = loadIntoMemory("test-aifc-none.aifc");
+            const auto none   = std::array{std::byte{'N'}, std::byte{'O'}, std::byte{'N'}, std::byte{'E'}};
+            const auto it     = std::search(memory.begin(), memory.end(), none.begin(), none.end());
+            REQUIRE(it != memory.end());
+            const auto xxxx = std::array{std::byte{'X'}, std::byte{'X'}, std::byte{'X'}, std::byte{'X'}};
+            std::copy(xxxx.begin(), xxxx.end(), it);
+            CHECK(!inputSoundFile.openFromMemory(memory.data(), memory.size()));
+        }
     }
 
     SECTION("openFromStream()")
@@ -294,6 +396,18 @@ TEST_CASE("[Audio] sf::InputSoundFile")
                 CHECK(inputSoundFile.getTimeOffset() == sf::Time::Zero);
                 CHECK(inputSoundFile.getSampleOffset() == 0);
             }
+
+            SECTION("aiff")
+            {
+                REQUIRE(stream.open("test-aiff16.aiff"));
+                REQUIRE(inputSoundFile.openFromStream(stream));
+                CHECK(inputSoundFile.getSampleCount() == 1'000);
+                CHECK(inputSoundFile.getChannelCount() == 1);
+                CHECK(inputSoundFile.getSampleRate() == 44'100);
+                CHECK(inputSoundFile.getDuration() == sf::microseconds(22'675));
+                CHECK(inputSoundFile.getTimeOffset() == sf::Time::Zero);
+                CHECK(inputSoundFile.getSampleOffset() == 0);
+            }
         }
     }
 
@@ -328,6 +442,14 @@ TEST_CASE("[Audio] sf::InputSoundFile")
             sf::InputSoundFile inputSoundFile("killdeer.wav");
             inputSoundFile.seek(1'000);
             CHECK(inputSoundFile.getTimeOffset() == sf::microseconds(45'351));
+            CHECK(inputSoundFile.getSampleOffset() == 1'000);
+        }
+
+        SECTION("aiff")
+        {
+            sf::InputSoundFile inputSoundFile("test-aiff16.aiff");
+            inputSoundFile.seek(1'000);
+            CHECK(inputSoundFile.getTimeOffset() == sf::microseconds(22'675));
             CHECK(inputSoundFile.getSampleOffset() == 1'000);
         }
     }
@@ -392,6 +514,58 @@ TEST_CASE("[Audio] sf::InputSoundFile")
             SECTION("wav")
             {
                 // Cannot be tested since reading from a .wav file triggers UB
+            }
+
+            SECTION("aiff 16-bit")
+            {
+                inputSoundFile = sf::InputSoundFile("test-aiff16.aiff");
+                CHECK(inputSoundFile.read(samples.data(), samples.size()) == 4);
+                CHECK(samples == std::array<std::int16_t, 4>{0, 1, 2, 3});
+                CHECK(inputSoundFile.read(samples.data(), samples.size()) == 4);
+                CHECK(samples == std::array<std::int16_t, 4>{4, 5, 6, 7});
+            }
+
+            SECTION("aiff 8-bit")
+            {
+                inputSoundFile = sf::InputSoundFile("test-aiff8.aiff");
+                CHECK(inputSoundFile.read(samples.data(), samples.size()) == 4);
+                CHECK(samples == std::array<std::int16_t, 4>{-12'800, -12'544, -12'288, -12'032});
+            }
+
+            SECTION("aiff 24-bit")
+            {
+                inputSoundFile = sf::InputSoundFile("test-aiff24.aiff");
+                CHECK(inputSoundFile.read(samples.data(), samples.size()) == 4);
+                CHECK(samples == std::array<std::int16_t, 4>{0, 0, 1, -1});
+                CHECK(inputSoundFile.read(samples.data(), samples.size()) == 4);
+                CHECK(samples == std::array<std::int16_t, 4>{2, -2, 3, -3});
+            }
+
+            SECTION("aiff 32-bit")
+            {
+                inputSoundFile = sf::InputSoundFile("test-aiff32.aiff");
+                CHECK(inputSoundFile.read(samples.data(), samples.size()) == 4);
+                CHECK(samples == std::array<std::int16_t, 4>{0, 1, 2, 3});
+                CHECK(inputSoundFile.read(samples.data(), samples.size()) == 4);
+                CHECK(samples == std::array<std::int16_t, 4>{4, 5, 6, 7});
+            }
+
+            SECTION("aifc sowt")
+            {
+                inputSoundFile = sf::InputSoundFile("test-aifc-sowt.aifc");
+                CHECK(inputSoundFile.read(samples.data(), samples.size()) == 4);
+                CHECK(samples == std::array<std::int16_t, 4>{0, 1, 2, 3});
+                CHECK(inputSoundFile.read(samples.data(), samples.size()) == 4);
+                CHECK(samples == std::array<std::int16_t, 4>{4, 5, 6, 7});
+            }
+
+            SECTION("aifc none")
+            {
+                inputSoundFile = sf::InputSoundFile("test-aifc-none.aifc");
+                CHECK(inputSoundFile.read(samples.data(), samples.size()) == 4);
+                CHECK(samples == std::array<std::int16_t, 4>{0, 1, 2, 3});
+                CHECK(inputSoundFile.read(samples.data(), samples.size()) == 4);
+                CHECK(samples == std::array<std::int16_t, 4>{4, 5, 6, 7});
             }
         }
     }

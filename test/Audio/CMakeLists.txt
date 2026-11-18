@@ -30,6 +30,12 @@ if(SFML_OS_IOS)
         killdeer-🐌.wav
         killdeer-ń.wav
         killdeer.wav
+        test-aifc-none.aifc
+        test-aifc-sowt.aifc
+        test-aiff8.aiff
+        test-aiff16.aiff
+        test-aiff24.aiff
+        test-aiff32.aiff
     )
     target_sources(test-sfml-audio PRIVATE ${AUDIO_RESOURCE})
     set_source_files_properties(${AUDIO_RESOURCE} PROPERTIES MACOSX_PACKAGE_LOCATION "Audio")

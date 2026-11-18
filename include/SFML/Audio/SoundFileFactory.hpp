@@ -31,7 +31,8 @@
 
 #include <filesystem>
 #include <memory>
-#include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include <cstddef>
 
@@ -156,8 +157,9 @@ private:
     using ReaderCheckFnPtr = bool (*)(InputStream&);
     using WriterCheckFnPtr = bool (*)(const std::filesystem::path&);
 
-    using ReaderFactoryMap = std::unordered_map<CreateFnPtr<SoundFileReader>, ReaderCheckFnPtr>;
-    using WriterFactoryMap = std::unordered_map<CreateFnPtr<SoundFileWriter>, WriterCheckFnPtr>;
+    // Readers and writers are probed in registration order, so a sequence container is used
+    using ReaderFactoryMap = std::vector<std::pair<CreateFnPtr<SoundFileReader>, ReaderCheckFnPtr>>;
+    using WriterFactoryMap = std::vector<std::pair<CreateFnPtr<SoundFileWriter>, WriterCheckFnPtr>>;
 
     ////////////////////////////////////////////////////////////
     // Static member functions
